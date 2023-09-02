@@ -1,13 +1,18 @@
 # ForthX16
 Forth TX16 or ForthX16 is an enhanced port of my older project [Forth Model T](https://github.com/VasylTsv/ForthModelT) for [Commander X16](https://www.commanderx16.com/). It is a completely functional Forth 2012 core for Commander X16 with most features from Forth Model T included. The only two limitations are related to the limited capabilities of the file system on X16 and to the lack of lowercase in C64/X16 charset (it is more nuanced, but it may not be worth effort supporting it). There are also some minor additions and improvements.
+
 The root contains just one assembly file `fthtx16.asm`. It is proper 6502 assebly in [ACME assembler](https://sourceforge.net/projects/acme-crossass/files/win32/) format. Use the following command line to build the binary:
 ```
 acme --cpu 6502 --outfile fthtx16.prg --format cbm fthtx16.asm
 ```
 The resulting PRG file can be copied to Commander X16 file system and loaded as usual. It is thoroughly tested with the emulator, but I don't have access to the actual hardware yet, so let me know if it breaks on metal.
+
 Note that the format is compatible with Commodore 64, but it has not been tested on that system. It might actually work, but YMMV.
+
 A prebuilt binary can be found in `binary`folder.
+
 A modified copy of dynamic memory support package can be found in `dynamic`.
+
 A modified copy of Forth test suite is in `tests` - copy files from there to the file system of Commander X16 and start it with `INCLUDE RUNTESTS.FTH`. The current version should run all tests without errors. The runtime on the emulator is about 4 minutes.
 
 There are a few known issues with the current release.
