@@ -4120,6 +4120,8 @@ c64open_x:
 	jsr SETLFS
 	jsr OPEN
 	bcs c64open_error	; TODO: not seeing this firing
+	jsr READST
+	bne c64open_error
 	jmp next
 c64open_error:
 	lda _dtop
@@ -4271,7 +4273,9 @@ filestatus_n:
 	!text "FILE-STATUS"
 	!word filesize_n
 filestatus:
-	!word call, ro, openfile, over, closefile, drop, exit
+	!word call, ro, openfile, qbranch, filestatus_1, true, exit
+filestatus_1:
+	!word closefile, zero, exit
 
 setread:
 	!word setread_c
