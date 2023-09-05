@@ -47,6 +47,9 @@ CHRIN = $FFCF
 CHROUT = $FFD2
 GETIN = $FFE4
 READST = $FFB7
+STOP = $FFE1
+UDTIM = $FFEA
+SCNKEY = $FF9F
 
 !convtab raw
 
@@ -113,8 +116,9 @@ _ibufcount	= _sflip+2		;number of used buffers
 _source 	= _ibufcount+2 ; pointer to the current source
 _openfiles	= _source+2 	; bitfield for files currently open to translate from C64 to Forth opening semantics
 
+_stopcheck	= _openfiles+2
 ; And here's the spot to move the inner interpreter. There is more than enough space to fit that here
-next 		= _openfiles+2
+next 		= _stopcheck+1
 
 ; Some commonly used 6502 idioms. Note that ACME does not allow passing immediate values to macros...
 
@@ -321,6 +325,14 @@ jmpw_orig:
 ;	goto NEXT
 
 call:
+; STOP key handler will trigger on every 256th execution of call
+	inc _stopcheck
+	bne call_continue
+	jsr STOP
+	bne call_continue
+	jmp abort_c
+call_continue:
+
 	+ldax _ri
 	+rpush
 	+ldax _w
@@ -2489,7 +2501,7 @@ word:
 	!word call, tor, source, swap, ptrin, peek, add
 word_1:
 	!word over, ptrin, peek, greater, qbranch, word_2
-	!word dup, cpeek, lit, 127, and_op, rat, equal, qbranch, word_2 ; Note &127, this is a workaround for peculiar C64 annoyance. TODO: filter only 160->32
+	!word dup, cpeek, lit, 127, and_op, rat, equal, qbranch, word_2 ; Note &127, this is a workaround for peculiar C64 annoyance
 	!word ptrin, peek, oneplus, ptrin, poke, oneplus, branch, word_1
 word_2:
 	!word twodrop, rfrom, parse, dup, lit, _wordbuf, cpoke
@@ -2503,7 +2515,7 @@ parse:
 	!word call, tor, source, ptrin, peek, sub, oneplus, tor, ptrin, peek, add, dup, zero
 parse_1:
 	!word over, cpeek, rfrom, oneminus, dup, qbranch, parse_3
-	!word swap, lit, 127, and_op, rat, equal, qbranch, parse_2 ; SAME AS ABOVE - TODO!
+	!word swap, lit, 127, and_op, rat, equal, qbranch, parse_2 ; SAME AS ABOVE
 	!word drop, swap, drop, rdrop, ptrin, dup, peek, oneplus, swap, poke, exit
 parse_2:
 	!word tor, swap, oneplus, swap, oneplus, ptrin, dup, peek, oneplus, swap, poke, branch, parse_1
@@ -4290,6 +4302,23 @@ xreadchar:
 xreadchar_c:
 	jsr CHRIN
 	ldx #0
+	and #$7F		; Ignore high bit (so Shift-Space is not a problem)
+	cmp #10			; Do two substitutions: \n -> \r and \t -> ' '
+	bne xreadchar_1
+	lda NEW_LINE
+xreadchar_1:
+	cmp #9
+	bne xreadchar_2
+	lda #32
+xreadchar_2:
+	+dpush
+	jmp next
+
+xreadbyte:
+	!word xreadbyte_c
+xreadbyte_c:
+	jsr CHRIN
+	ldx #0
 	+dpush
 	jmp next
 
@@ -4338,7 +4367,7 @@ readfile:
 	!word call, setread, swap, dup, rot, add, over					; c-addr, c-addr-limit, current
 readfile_1:
 	!word twodup, swap, uless, qbranch, readfile_3				; buffer full?
-	!word iseof, zeroeq, qbranch, readfile_2, xreadchar		; end of file?
+	!word iseof, zeroeq, qbranch, readfile_2, xreadbyte		; end of file?
 	!word over, cpoke, oneplus, branch, readfile_1 
 readfile_2:
 readfile_3:
