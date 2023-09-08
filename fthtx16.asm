@@ -91,6 +91,7 @@ NST_FLAG = 64 ; flag for words not in ANS Forth
 VAL_TRUE = -1 ; required by current standard
 VAL_FALSE = 0
 JSR_INSTR = $20 ; DOES> needs to emit JSR opcode
+JMP_INSTR = $4C ; in direct threading each Forth word stars with JMP CALL
 
 NEW_LINE = $0D
 
@@ -214,18 +215,20 @@ next 		= _stopcheck+1
 
 ; Beginning of a compiled Forth word. Tokens follow
 !macro forth {
-	!word call
+;	!word call
+	jmp call
 }
 
 ; Beginning of a native code word. Assembler codes follow
 !macro code {
-	!word .c
+;	!word .c
 .c:
 }
 
 ; Passing execution to native code elsewhere
 !macro code .a {
-	!word .a
+;	!word .a
+	jmp .a
 }
 
 ; 16-bit value (typically for preceeding LIT token). Can be a native address
@@ -333,13 +336,13 @@ MEMTOP = _sourcestack - 120
 
 ; ==============================================================================
 
-; Structure of a vocabulary word in indirect threaded code:
+; Structure of a vocabulary word in direct threaded code:
 ; offset     length      meaning
 ;    0          1        n - length of the name and flags (NFA)
 ;    1          n        name
 ;    n+1        2        link to the previous word (LFA)
-;    n+3        2        pointer to code (typically CALL) (CFA)
-;    n+5        x        parameter list (for CALL these often are pointers
+;    n+3        3        jump to code (typically CALL) (CFA)
+;    n+6        x        parameter list (for CALL these often are pointers
 ;                          to code fields of other words (PFA)
 ; Note that the CPU architecture does not require alignment. If it was, the LFA
 ; could be aligned
@@ -384,7 +387,7 @@ inner_copy:
 ;	RI += 2
 ;	goto mem(W)
 
-_jmpw = next + jmpw_orig + 1 - next_orig
+;_jmpw = next + jmpw_orig + 1 - next_orig
 jmponw = next + jmponw_orig - next_orig
 
 next_orig:
@@ -402,19 +405,11 @@ next_orig:
 	inc _ri+1
 
 jmponw_orig:
-	ldy #1
-	lda (_w),y
-	sta <(_jmpw+1)
-	dey
-	lda (_w),y
-	sta <_jmpw
-jmpw_orig:
-	jmp $FFFF	; This command will be modified on zeropage
-
+	jmp (_w)
 
 ; CALL - this will execute the parameters at W
 ; 	rpush(RI)
-;	RI = W+2
+;	RI = W+3	; offset for JMP call
 ;	goto NEXT
 
 call:
@@ -429,7 +424,7 @@ call_continue:
 	+ldax _ri
 	+rpush
 	+ldax _w
-	+incax 2
+	+incax 3
 	+stax _ri
 	jmp next
 
@@ -452,20 +447,20 @@ invoke:
 	jmp jmponw
 
 ; CREATED - push the PFA on the stack (default semantics of a word after CREATE)
-;	push(W+2)
+;	push(W+3)	; offset for jmp call
 ;	goto NEXT
 
 created:
 	+ldax _w
-	+incax 2
+	+incax 3
 	+dpush
 	jmp next
 
 ; DOES - semantics applied to the defined word by DOES>. It is an extension of CREATE semantics that redirects
 ; the execution to the creating word
 ;	rpush(RI)
-;	RI = pop()   - this is supposed to be the return address from the SUB (JSR) instruction, not the top of the Forth stack!
-;	push(W+2)
+;	RI = pop()	; this is supposed to be the return address from the SUB (JSR) instruction, not the top of the Forth stack!
+;	push(W+3)	; offset for jmp call
 ;	goto NEXT
 
 does:
@@ -482,11 +477,11 @@ does:
 	jmp created	; starting with PUSH(W+2) it is the same
 
 ; DODEFER - semantics of the word created by DEFER
-;	W = mem(W+2)
+;	W = mem(W+2)	; offset for jmp call
 ;	goto mem(W)
 
 dodefer:
-	ldy #3
+	ldy #4
 	lda (_w),y
 	tax
 	dey
@@ -497,21 +492,21 @@ dodefer:
 ; DOVALUE - semantics of a VALUE
 ;	Assumes a very particular structure: pointer to semantics block followed by value bytes. Semantics block contains
 ;	three addresses: read semantics, write semantics, compilation semantics
-;	push(W+4)
-;	W = mem(mem(W+2))
+;	push(W+5)			; offset for jmp call and one pointer to semantics block
+;	W = mem(mem(W+3))	; offset for jmp call
 ;	goto mem(W)
 
 dovalue:
 	+ldax _w
-	+incax 4
+	+incax 5
 	+dpush
-	ldy #3
+	ldy #4
 	lda (_w),y
 	sta _rscratch+1
 	dey
 	lda (_w),y
 	sta _rscratch
-	dey
+	ldy #1
 	lda (_rscratch),y
 	sta _w+1
 	dey
@@ -521,11 +516,11 @@ dovalue:
 
 ; A number of Forth words have constant semantics. Typical systems define CONSTANT using DOES> but that wastes a few
 ; bytes for the call. Using a separate semantic word instead.
-;	push mem(W+2)
+;	push mem(W+3)	; offset for jmp call
 ;	goto NEXT
 
 doconst:
-	ldy #3
+	ldy #4
 	lda (_w),y
 	tax
 	dey
@@ -2258,7 +2253,7 @@ parsename_1:
 parsename_2:
 	+token twodrop, bl, parse, exit
 
-; Forth systems typically have a few words to move between different parts of a vocabulary word. In the indirect
+; Forth systems typically have a few words to move between different parts of a vocabulary word. In the direct
 ; threaded code the only non-trivial move is the one between LFA and NFA. In this particular model it abuses the
 ; fact that the maximum NFA length is 32+1 and the name cannot include characters with codes below 32. 
 +header ~lfatonfa, ~lfatonfa_n, parsename_n, 6 + NST_FLAG, "L>NAME"
@@ -2279,7 +2274,7 @@ lfatonfa_2:
 
 +header ~tobody, ~tobody_n, lfatonfa_n, 5, ">BODY"
 	+forth
-	+token twoplus, exit
+	+token oneplus, twoplus, exit
 
 +header ~context, ~context_n, tobody_n, 7 + NST_FLAG, "CONTEXT"
 	+code doconst
@@ -2653,7 +2648,8 @@ words_3:
 	+value call
 	+token equal, qbranch
 	+address qcomp_1	; if ?COMP immediately follows CALL
-	+token twominus, lfatonfa, count, lit
+;	+token twominus, lfatonfa, count, lit
+	+token oneminus, twominus, lfatonfa, count, lit
 	+value NAMEMASK
 	+token and_op, type, space					; output the word name with error
 qcomp_1:
@@ -2762,6 +2758,9 @@ xcreate_1:
 	+value _latest
 	+token poke
 	+token lit
+	+value JMP_INSTR	; for direct threading!
+	+token ccomma
+	+token lit
 	+value created
 	+token comma									; set CFA to a special code that pushes PFA on the stack
 	+token latest, context, poke, exit							; and add to the search order
@@ -2778,6 +2777,7 @@ xcreate_1:
 	+token latest, count, lit
 	+value NAMEMASK
 	+token and_op, add, twoplus	; CFA of the last defined word
+	+token oneplus ; PFA (!)
 	+token poke, exit										; and this will actually exit the defining word
 
 ; Note that while DOES> looks like high-level word its implementation is depended on the opcode for native CALL/JSR
@@ -2792,10 +2792,11 @@ xcreate_1:
 ; Note that colon will remove the word from the search order (to be restored by semicolon)
 +header ~colon, ~colon_n, doesx_n, 1, ":"
 	+forth
-	+token create, lit
+	+token create
+	+token lit
 	+value call
 	+token here, twominus, dup, tor, poke, rfrom
-	+token twominus, peek, context, poke, bracketx, exit
+	+token oneminus, twominus, peek, context, poke, bracketx, exit
 
 ; Words defined with :NONAME technically don't need to be linked in the vocabulary but if it is done that way RECURSE becomes harder
 ; to implement. It is easier just to link the word with emtpy name. In this implementation it has an unusual side effect that FIND
@@ -2812,7 +2813,11 @@ xcreate_1:
 	+token latest, comma, lit
 	+value _latest
 	+token poke		; LFA
-	+token here, lit
+	+token here
+	+token lit
+	+value JMP_INSTR
+	+token ccomma
+	+token lit
 	+value call
 	+token comma, bracketx, exit	; CFA and keep the address on stack
 
@@ -2846,7 +2851,7 @@ xcreate_1:
 
 +header ~qdefer, ~qdefer_n, defer_n, 6 + NST_FLAG, "?DEFER"
 	+forth
-	+token dup, peek, lit
+	+token dup, oneplus, peek, lit
 	+value dodefer
 	+token equal, qbranch
 	+address qdefer_1
@@ -2879,10 +2884,8 @@ actionof_1:
 is_1:
 	+token tick, deferpoke, exit
 
-;
-; : (comp!) compile lit , compile ! ; nonstandard
-; : value create ' dovalue here 2- ! ' >mark , , exit >resolve @ ! (comp!) ;
-;
+; "value" has a special structure: three tokens for read semantics,
+; write semantics, and compile semantics, followed by the value itself
 
 +header ~value, ~value_n, is_n, 5, "VALUE"
 	+forth
@@ -2893,14 +2896,14 @@ is_1:
 	+token comma, comma, exit
 value_sem:
 	+token peek, poke, comppoke
-comppoke:
+
++header_internal ~comppoke
 	+forth
-	+token compile, lit, comma
-	+token compile, poke, exit
+	+token compile, lit, comma, compile, poke, exit
 
 +header ~to, ~to_n, value_n, 2 + IMM_FLAG, "TO"
 	+forth
-	+token bl, word, find, drop, dup, peek, lit
+	+token bl, word, find, drop, oneplus, dup, peek, lit
 	+value dovalue
 	+token equal, qbranch
 	+address to_2
@@ -3101,7 +3104,7 @@ forget_1:
 	+token create, xcode
 	!byte JSR_INSTR
 	+token does
-	+token twominus, twominus, dup, peek, dup, lit
+	+token oneminus, twominus, twominus, dup, peek, dup, lit
 	+value _latest
 	+token poke, context, poke
 	+token lfatonfa, lit
@@ -3739,10 +3742,11 @@ dliteral_1:
 	+token comma, comma, comma, exit
 dvalue_sem:
 	+token twopeek, twopoke, compdpoke
-compdpoke:
+
++header_internal ~compdpoke
 	+forth
-	+token compile, lit, comma
-	+token compile, twopoke, exit
+	+token compile, lit, comma, compile, twopoke, exit
+
 
 ;
 ; M*/ is an unusual word that uses three-cell numbers. It is possible to build it from the existing words
