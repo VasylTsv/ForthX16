@@ -101,12 +101,14 @@ _w			= _ri+2
 _rstack		= _w+2			; stack pointers
 _dstack		= _rstack+2
 _dtop		= _dstack+2		; the very top element of the data stack
-_rscratch	= _dtop+2		; three scratch registers used in multiple algorithms (sometimes aliased)
+_rscratch	= _dtop+2		; four scratch registers used in multiple algorithms (sometimes aliased)
 _wscratch	= _rscratch+2
 _scratch	= _wscratch+2
+_scratch_1	= _scratch+2
+_scratch_2	= _scratch_1+2
 
 ; Other zero page vars
-_here		= _scratch+2
+_here		= _scratch_2+2
 _base		= _here+2
 _context	= _base+2
 _latest		= _context+2
@@ -118,8 +120,6 @@ _source 	= _ibufcount+2 ; pointer to the current source
 _openfiles	= _source+2 	; bitfield for files currently open to translate from C64 to Forth opening semantics
 
 _stopcheck	= _openfiles+2
-; And here's the spot to move the inner interpreter. There is more than enough space to fit that here
-next 		= _stopcheck+1
 
 ; Some commonly used 6502 idioms. Note that ACME does not allow passing immediate values to macros...
 
@@ -158,6 +158,22 @@ next 		= _stopcheck+1
 	bcs +
 	dex
 +
+}
+
+!macro inc16 .addr {
+	inc .addr
+	bne +
+	inc .addr+1
++
+}
+
+!macro dec16 .addr {
+	pha
+	lda .addr
+	bne +
+	dec .addr+1
++	dec .addr
+	pla
 }
 
 ; Stack access is behind macros so it is easier to change in the future
@@ -215,19 +231,15 @@ next 		= _stopcheck+1
 
 ; Beginning of a compiled Forth word. Tokens follow
 !macro forth {
-;	!word call
 	jmp call
 }
 
 ; Beginning of a native code word. Assembler codes follow
 !macro code {
-;	!word .c
-.c:
 }
 
 ; Passing execution to native code elsewhere
 !macro code .a {
-;	!word .a
 	jmp .a
 }
 
@@ -359,24 +371,6 @@ MEMTOP = _sourcestack - 120
 ;            +value 2
 ;            +token dup, plus, dot, exit
 
-; Move the inner interpreter to zeropage. The only reason for that is to save a few
-; clocks on the workaround for broken indirect JMP
-	ldy #call-next_orig
-	lda #<next_orig
-	sta _rscratch
-	lda #>next_orig
-	sta _rscratch+1
-	lda #next
-	sta _wscratch
-	lda #0
-	sta _wscratch+1
-inner_copy:
-	lda (_rscratch),y
-	sta (_wscratch),y
-	dey
-	bpl inner_copy
-	jmp next
-
 ; ==============================================================================
 ; Inner interpreter
 ;
@@ -387,10 +381,7 @@ inner_copy:
 ;	RI += 2
 ;	goto mem(W)
 
-;_jmpw = next + jmpw_orig + 1 - next_orig
-jmponw = next + jmponw_orig - next_orig
-
-next_orig:
+next:
 	ldy #0
 	lda (_ri),y
 	sta _w
@@ -401,10 +392,10 @@ next_orig:
 	lda _ri
 	+add 2
 	sta _ri
-	bcc jmponw_orig
+	bcc jmponw
 	inc _ri+1
 
-jmponw_orig:
+jmponw:
 	jmp (_w)
 
 ; CALL - this will execute the parameters at W
@@ -477,7 +468,7 @@ does:
 	jmp created	; starting with PUSH(W+2) it is the same
 
 ; DODEFER - semantics of the word created by DEFER
-;	W = mem(W+2)	; offset for jmp call
+;	W = mem(W+3)	; offset for jmp call
 ;	goto mem(W)
 
 dodefer:
@@ -2648,7 +2639,6 @@ words_3:
 	+value call
 	+token equal, qbranch
 	+address qcomp_1	; if ?COMP immediately follows CALL
-;	+token twominus, lfatonfa, count, lit
 	+token oneminus, twominus, lfatonfa, count, lit
 	+value NAMEMASK
 	+token and_op, type, space					; output the word name with error
@@ -3332,159 +3322,123 @@ spaces_2:
 move_1:
 	+token rot, cmove, exit
 
-; TODO: Rewrite, this is way to ugly and too slow
 ; Non-standard word, similar to CMOVE but does character conversions for S\". Returns number
 ; of characters processed and returned
+; addr_from, addr_to, len_limit -> len_actual, let_result
+; Note that this implementation is an overkill for S\" word - the string in that word cannot
+; possibly be longer than 100 characters.
+_sactual = _dtop
+_sresult = _scratch_1
+_stemp = _scratch_2
+
 +header ~smove, ~smove_n, move_n, 5 + NST_FLAG, "SMOVE"
-	+forth
-	+token dup, tor, base, peek, tor, zero, tor
+	+code
+	+dpop
+	+stax _scratch
+	+dpop
+	+stax _wscratch
+	+ldax _dtop
+	+stax _rscratch
+	
+	lda #0
+	sta _sactual
+	sta _sactual+1
+	sta _sresult
+	sta _sresult+1
+
+	tay
+	ldx _scratch+1
+	beq smove_2
 smove_1:
-	+token dup, qbranch
-	+address smove_x
-	+token oneminus, two, pick, cpeek, lit
-	+value '"'
-	+token notequal, qbranch
-	+address smove_x ; decrement before check for quote is intentional!
-	+token tor, tor, dup, oneplus, swap, cpeek, dup, lit
-	+value '\\'
-	+token equal, qbranch
-	+address smove_0
-	+token drop, rfrom, rfrom, dup, qbranch
-	+address smove_x
-	+token oneminus
-	+token tor, tor, dup, oneplus, swap, cpeek
-	+token dup, lit
-	+value 'A'
-	+token equal, qbranch
-	+address smove_2
-	+token drop, lit
-	+value 7
-	+token branch
-	+address smove_0
+	jsr smove_char
+	iny
+	bne smove_1
+	inc _rscratch+1
+	inc _wscratch+1
+	dex
+	bne smove_1
 smove_2:
-	+token dup, lit
-	+value 'B'
-	+token equal, qbranch
-	+address smove_3
-	+token drop, lit
-	+value 8
-	+token branch
-	+address smove_0
+	ldx _scratch
+	beq smove_4
 smove_3:
-	+token dup, lit
-	+value 'E'
-	+token equal, qbranch
-	+address smove_4
-	+token drop, lit
-	+value 27
-	+token branch
-	+address smove_0
+	jsr smove_char
+	iny
+	dex
+	bne smove_3
 smove_4:
-	+token dup, lit
-	+value 'F'
-	+token equal, qbranch
-	+address smove_5
-	+token drop, lit
-	+value 12
-	+token branch
-	+address smove_0
-smove_5:
-	+token dup, lit
-	+value 'L'
-	+token equal, qbranch
-	+address smove_6
-	+token drop, lit
-	+value 10
-	+token branch
-	+address smove_0
-smove_6:
-	+token dup, lit
-	+value 'N'
-	+token equal, qbranch
-	+address smove_7
-	+token drop, lit
-	+value 13
-	+token branch
-	+address smove_0
-smove_7:
-	+token dup, lit
-	+value 'Q'
-	+token equal, qbranch
-	+address smove_8
-	+token drop, lit
-	+value 34
-	+token branch
-	+address smove_0
-smove_8:
-	+token dup, lit
-	+value 'R'
-	+token equal, qbranch
-	+address smove_9
-	+token drop, lit
-	+value 13
-	+token branch
-	+address smove_0
+
+	+ldax _sresult
+	+dpush
+	jmp next
+
+smove_char:
+	+inc16 _sactual		; increasing the actual count before any checks so it will include the quote
+	lda (_rscratch),y
+	cmp #'\"'
+	beq smove_7			; end of the string
+	cmp #'\\'
+	bne smove_8			; is this an escaped character
+	+inc16 _sactual
+	+inc16 _rscratch
+	lda (_rscratch),y
+	cmp #'M'
+	bne smove_9			; 'm' translated into two character
+	lda #13
+	sta (_wscratch),y
+	+inc16 _wscratch
+	+inc16 _sresult
+	lda #10
+	bne smove_8
 smove_9:
-	+token dup, lit
-	+value 'T'
-	+token equal, qbranch
-	+address smove_10
-	+token drop, lit
-	+value 9
-	+token branch
-	+address smove_0
+	cmp #'X'			; 'x' is a hex sequence
+	bne smove_10
+	+inc16 _sactual
+	+inc16 _rscratch
+	lda (_rscratch),y
+	jsr smove_hexdigit
+	asl
+	asl
+	asl
+	asl
+	sta _stemp
+	+inc16 _sactual
+	+inc16 _rscratch
+	lda (_rscratch),y
+	jsr smove_hexdigit
+	ora _stemp
+	jmp smove_8
 smove_10:
-	+token dup, lit
-	+value 'V'
-	+token equal, qbranch
-	+address smove_11
-	+token drop, lit
-	+value 11
-	+token branch
-	+address smove_0
-smove_11:
-	+token dup, lit
-	+value 'Z'
-	+token equal, qbranch
-	+address smove_12
-	+token drop, zero, branch
-	+address smove_0
-smove_12:
-	+token dup, lit
-	+value 'M'
-	+token equal, qbranch
-	+address smove_13
-	+token drop
-	+token rfrom, lit
-	+value 13
-	+token over, cpoke, oneplus, lit
-	+value 10
-	+token over, cpoke, oneplus
-	+token rfrom, rfrom, twoplus, tor, branch
-	+address smove_1
-smove_13:
-	+token dup, lit
-	+value 'X'
-	+token equal, qbranch
-	+address smove_0
-	+token drop
-	+token rfrom, rfrom, dup, one, greater, qbranch
-	+address smove_x
-	+token twominus, tor, tor
-	+token hex, dup, twoplus, swap, zero, zero
-	+token rot, two, tonumber, qbranch
-	+address smove_14
-	+token twodrop, twodrop, rdrop, rdrop
-	+token rfrom, rfrom, base, poke, exit
-smove_14:
-	+token twodrop
-smove_0:
-	+token rfrom, swap, over, cpoke, oneplus
-	+token rfrom, rfrom, oneplus, tor, branch
-	+address smove_1 
-smove_x:
-	+token nip, nip, rfrom, rfrom, base
-	+token poke, rfrom, rot, sub, swap, exit
+	cmp #'A'
+	bmi smove_8
+	cmp #'Z'+1
+	bpl smove_8
+	stx _stemp
+	+sub 'A'
+	tax
+	lda smove_subst,x
+	ldx _stemp
+smove_8:
+	sta (_wscratch),y
+	+inc16 _sresult		; increasing the result after the character is written to the destination
+	rts
+smove_7:
+	ldx #0
+	stx _scratch
+	inx					; this will instantly terminate both loops in the caller
+	rts
+
+smove_hexdigit:
+	+sub '0'
+	cmp #10
+	bmi smove_h1
+	+sub 'A'-'0'-10
+smove_h1:
+	rts
+
+smove_subst:
+	!byte 7,8,'C','D',27,12,'G','H','I','J','K'
+	!byte 10,'M',NEW_LINE,'O','P',34,13,'S',9,'U',11
+	!byte 'W','X','Y',0
 
 +header ~pad, ~pad_n, smove_n, 3, "PAD"
 	+code doconst
@@ -3810,7 +3764,8 @@ mmuldiv_1:
 	+forth
 	+token dlit
 	+value $FFFF
-	+token $7FFF, exit
+	+value $7FFF
+	+token exit
 				
 +header ~env_maxn, ~env_maxn_n, env_maxd_n, 5 + NST_FLAG, "MAX-N"
 	+code doconst
@@ -3824,7 +3779,8 @@ mmuldiv_1:
 	+forth
 	+token dlit
 	+value $FFFF
-	+token $FFFF, exit
+	+value $FFFF
+	+token exit
 				
 +header ~env_rstack, ~env_rstack_n, env_maxud_n, 18 + NST_FLAG, "RETURN-STACK-CELLS"
 	+code doconst
