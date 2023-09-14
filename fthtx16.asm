@@ -23,6 +23,10 @@
 ; Removed CSTR, not used
 ; Added PLACE and +PLACE
 ; A number of words were rewritten in assembly for speed
+; Removed SAVE-SYSTEM - may come back in a different variation
+; Removed non-standard flag support words, did not serve much purpose
+; Removed ENVIRONMENT? queries, not required by standard, useless
+; Changed some non-standard internal word semantics for better code reuse ((FIND), (CREATE))
 
 ; Peculiarities:
 ;	C64 PETSCII charset does not have backslash. Pound symbol is used instead
@@ -92,6 +96,7 @@ VAL_TRUE = -1 ; required by current standard
 VAL_FALSE = 0
 JSR_INSTR = $20 ; DOES> needs to emit JSR opcode
 JMP_INSTR = $4C ; in direct threading each Forth word stars with JMP CALL
+RTS_INSTR = $60	; in size-optimized direct threading this is the entire prolog of Forth calls
 
 NEW_LINE = $0D
 
@@ -213,7 +218,15 @@ _stopcheck	= _openfiles+2
 .label_n:
 	!byte .s
 	!text .name
-	!word .prev_n
+	!if .label_n-.prev_n < 128 {
+		!byte .label_n-.prev_n
+	} else {
+		!if .prev_n = 0 {
+			!byte 0
+		} else {
+			!byte ((.label_n-.prev_n) >> 8) | $80, (.label_n-.prev_n) & $FF
+		}
+	}
 .label:
 }
 
@@ -223,15 +236,14 @@ _stopcheck	= _openfiles+2
 ; Anything that starts with +code or +forth should have one of the header
 ; varieties.
 !macro header_internal ~.label {
-	!byte 1
-	!text "~"
-	!word 0
+	!byte 0
+	!byte 0
 .label:
 }
 
 ; Beginning of a compiled Forth word. Tokens follow
 !macro forth {
-	jmp call
+	rts
 }
 
 ; Beginning of a native code word. Assembler codes follow
@@ -248,9 +260,19 @@ _stopcheck	= _openfiles+2
 	!word .v
 }
 
+; Similarly, 8-bite value for BLIT
+!macro bvalue .v {
+	!byte .v
+}
+
 ; Address (typically for preceeding BRANCH or ?BRANCH tokens)
 !macro address .a {
 	!word .a
+}
+
+; Short relative address for BBRANCH and ?BBRANCH
+!macro baddress .a {
+	!byte .a-*
 }
 
 ; Pascal-style string
@@ -346,6 +368,13 @@ MEMTOP = _sourcestack - 120
 	+ldax xinit_here
 	+stax _here
 
+; Prep for the Forth words, so RTS will jump to CALL. As call starts with the same
+; sequence, it will be consistently repeatable while saving 2 bytes per Forth word
+	lda #>call-1
+	pha
+	lda #<call-1
+	pha
+
 ; ==============================================================================
 
 ; Structure of a vocabulary word in direct threaded code:
@@ -400,10 +429,16 @@ jmponw:
 
 ; CALL - this will execute the parameters at W
 ; 	rpush(RI)
-;	RI = W+3	; offset for JMP call
+;	RI = W+1	; offset for RTS
 ;	goto NEXT
 
 call:
+; prep for the subsequent call
+	lda #>call-1
+	pha
+	lda #<call-1
+	pha
+
 ; STOP key handler will trigger on every 256th execution of call
 	inc _stopcheck
 	bne call_continue
@@ -415,7 +450,7 @@ call_continue:
 	+ldax _ri
 	+rpush
 	+ldax _w
-	+incax 3
+	+incax 1
 	+stax _ri
 	jmp next
 
@@ -438,7 +473,7 @@ invoke:
 	jmp jmponw
 
 ; CREATED - push the PFA on the stack (default semantics of a word after CREATE)
-;	push(W+3)	; offset for jmp call
+;	push(W+3)	; Note the offset 3 here. "Created" words have JMP CREATED prolog, not RTS!
 ;	goto NEXT
 
 created:
@@ -451,7 +486,7 @@ created:
 ; the execution to the creating word
 ;	rpush(RI)
 ;	RI = pop()	; this is supposed to be the return address from the SUB (JSR) instruction, not the top of the Forth stack!
-;	push(W+3)	; offset for jmp call
+;	push(W+3)	; offset for jmp call - see the above note
 ;	goto NEXT
 
 does:
@@ -468,7 +503,7 @@ does:
 	jmp created	; starting with PUSH(W+2) it is the same
 
 ; DODEFER - semantics of the word created by DEFER
-;	W = mem(W+3)	; offset for jmp call
+;	W = mem(W+3)	; offset for jmp dodefer
 ;	goto mem(W)
 
 dodefer:
@@ -483,8 +518,8 @@ dodefer:
 ; DOVALUE - semantics of a VALUE
 ;	Assumes a very particular structure: pointer to semantics block followed by value bytes. Semantics block contains
 ;	three addresses: read semantics, write semantics, compilation semantics
-;	push(W+5)			; offset for jmp call and one pointer to semantics block
-;	W = mem(mem(W+3))	; offset for jmp call
+;	push(W+5)			; offset for jmp dovalue and one pointer to semantics block
+;	W = mem(mem(W+3))	; offset for jmp dovalue
 ;	goto mem(W)
 
 dovalue:
@@ -507,7 +542,7 @@ dovalue:
 
 ; A number of Forth words have constant semantics. Typical systems define CONSTANT using DOES> but that wastes a few
 ; bytes for the call. Using a separate semantic word instead.
-;	push mem(W+3)	; offset for jmp call
+;	push mem(W+3)	; offset for jmp doconst
 ;	goto NEXT
 
 doconst:
@@ -656,6 +691,8 @@ moveup_3:
 
 +header ~bye, ~bye_n, 0, 3, "BYE"
 	+code
+	pla
+	pla
 	rts
 
 ; EXIT is used to return from any word.
@@ -710,8 +747,8 @@ abort_c:
 	+token over, poke							; TIB
 	+token twominus, zero, over, poke			; >IN
 	+token twominus, zero, over, poke			; SOURCE-ID
-	+token twominus, lit
-	+value $0004
+	+token twominus, blit
+	+bvalue $04
 	+token over, poke		; standard input has 4 parameters: 0, >IN, TIB, #TIB
 	+token lit
 	+value _source
@@ -748,40 +785,40 @@ xinit_context:
 xinit_latest:
 	+address forth_system_n
 
-; SAVE-SYSTEM has been modified for X16 version - the image start is not 0
-; anymore and the image requires the image start to be written to the file first
-+header ~savesystem, ~savesystem_n, xinits_n, 11 + NST_FLAG, "SAVE-SYSTEM"
-	+forth
-	+token parsename, wo, openfile, zeroeq, qbranch
-	+address savesystem_1
-	+token tor
-	+token lit
-	+value start_of_image
-	+token pad, poke, pad, two, rat, writefile
-	+token lit
-	+value start_of_image
-	+token lit
-	+value xinit_startup
-	+token over, sub, rat, writefile, drop
-	+token pad, lit
-	+value forth_system_c
-	+token over, poke
-	+token twoplus, here, over, poke
-	+token twoplus, lit
-	+value _context
-	+token peek, over, poke
-	+token twoplus, lit
-	+value _latest
-	+token peek, over, poke
-	+token drop, pad, lit
-	+value $0008
-	+token rat, writefile, drop
-	+token lit
-	+value xinit_latest
-	+token twoplus, here, over, sub, rat, writefile, drop
-	+token rfrom, closefile
-savesystem_1:
-	+token drop, exit
+;; SAVE-SYSTEM has been modified for X16 version - the image start is not 0
+;; anymore and the image requires the image start to be written to the file first
+;+header ~savesystem, ~savesystem_n, xinits_n, 11 + NST_FLAG, "SAVE-SYSTEM"
+;	+forth
+;	+token parsename, wo, openfile, zeroeq, qbranch
+;	+address savesystem_1
+;	+token tor
+;	+token lit
+;	+value start_of_image
+;	+token pad, poke, pad, two, rat, writefile
+;	+token lit
+;	+value start_of_image
+;	+token lit
+;	+value xinit_startup
+;	+token over, sub, rat, writefile, drop
+;	+token pad, lit
+;	+value forth_system_c
+;	+token over, poke
+;	+token twoplus, here, over, poke
+;	+token twoplus, lit
+;	+value _context
+;	+token peek, over, poke
+;	+token twoplus, lit
+;	+value _latest
+;	+token peek, over, poke
+;	+token drop, pad, blit
+;	+bvalue $0008
+;	+token rat, writefile, drop
+;	+token lit
+;	+value xinit_latest
+;	+token twoplus, here, over, sub, rat, writefile, drop
+;	+token rfrom, closefile
+;savesystem_1:
+;	+token drop, exit
 
 
 ; ==============================================================================
@@ -796,7 +833,7 @@ savesystem_1:
 ; -1 constant -1
 ;
 
-+header ~zero, ~zero_n, savesystem_n, 1 + NST_FLAG, "0"
++header ~zero, ~zero_n, xinits_n, 1 + NST_FLAG, "0"
 	+code doconst
 	+value $0000
 
@@ -992,8 +1029,8 @@ rshift_2:
 
 +header ~stod, ~stod_n, rshift_n, 3, "S>D"
 	+forth
-	+token dup, zerolt, qbranch
-	+address stod_1
+	+token dup, zerolt, qbbranch
+	+baddress stod_1
 	+token minusone, exit
 stod_1:
 	+token zero, exit
@@ -1006,8 +1043,8 @@ stod_1:
 ; Optional Double-numbler word set
 +header ~dabs, ~dabs_n, dnegate_n, 4, "DABS"
 	+forth
-	+token dup, zerolt, qbranch
-	+address dabs_1
+	+token dup, zerolt, qbbranch
+	+baddress dabs_1
 	+token dnegate
 dabs_1:
 	+token exit
@@ -1021,10 +1058,10 @@ dabs_1:
 +header ~fmmod, ~fmmod_n, dabs_n, 6, "FM/MOD"
 	+forth
 	+token dup, tor, smrem, over, dup, zerone
-	+token swap, zerolt, rat, zerolt, xor, and_op, qbranch
-	+address fmmod_1
-	+token oneminus, swap, rfrom, add, swap, branch
-	+address fmmod_2
+	+token swap, zerolt, rat, zerolt, xor, and_op, qbbranch
+	+baddress fmmod_1
+	+token oneminus, swap, rfrom, add, swap, bbranch
+	+baddress fmmod_2
 fmmod_1:
 	+token rdrop
 fmmod_2:
@@ -1041,12 +1078,12 @@ fmmod_2:
 	+forth
 	+token twodup, xor, tor, over, tor
 	+token abs, tor, dabs, rfrom, ummod
-	+token swap, rfrom, zerolt, qbranch
-	+address smrem_1
+	+token swap, rfrom, zerolt, qbbranch
+	+baddress smrem_1
 	+token negate
 smrem_1:
-	+token swap, rfrom, zerolt, qbranch
-	+address smrem_2
+	+token swap, rfrom, zerolt, qbbranch
+	+baddress smrem_2
 	+token negate
 smrem_2:
 	+token exit
@@ -1188,8 +1225,8 @@ ummult_x:
 +header ~mmult, ~mmult_n, ummult_n, 2, "M*"
 	+forth
 	+token twodup, xor, tor, abs, swap
-	+token abs, ummult, rfrom, zerolt, qbranch
-	+address mmult_1
+	+token abs, ummult, rfrom, zerolt, qbbranch
+	+baddress mmult_1
 	+token dnegate
 mmult_1:
 	+token exit
@@ -1388,16 +1425,16 @@ less_y5:
 
 +header ~max, ~max_n, greater_n, 3, "MAX"
 	+forth
-	+token twodup, less, qbranch
-	+address max_1
+	+token twodup, less, qbbranch
+	+baddress max_1
 	+token swap
 max_1:
 	+token drop, exit
 
 +header ~min, ~min_n, max_n, 3, "MIN"
 	+forth
-	+token twodup, greater, qbranch
-	+address min_1
+	+token twodup, greater, qbbranch
+	+baddress min_1
 	+token swap
 min_1:
 	+token drop, exit
@@ -1526,8 +1563,6 @@ uless_1:
 ;	code pick
 ;	code roll ; using reference implementation from forth-standard.org instead
 ;
-; TODO - maybe check stack in both calls
-
 +header ~pick, ~pick_n, rot_n, 4, "PICK"
 	+code
 	asl _dtop
@@ -1549,8 +1584,8 @@ uless_1:
 
 +header ~roll, ~roll_n, pick_n, 4, "ROLL"
 	+forth
-	+token dup, qbranch
-	+address roll_1 ; Using reference implementation
+	+token dup, qbbranch
+	+baddress roll_1 ; Using reference implementation
 	+token swap, tor, oneminus, roll, rfrom, swap, exit
 roll_1:
 	+token drop, exit
@@ -1603,8 +1638,8 @@ roll_1:
 
 +header ~qdup, ~qdup_n, twoover_n, 4, "?DUP"
 	+forth
-	+token dup, qbranch
-	+address qdup_1
+	+token dup, qbbranch
+	+baddress qdup_1
 	+token dup 
 qdup_1:
 	+token exit
@@ -1804,6 +1839,19 @@ qdup_1:
 	+stax _ri
 	jmp next
 
+; a lot of LIT calls are for small values
++header_internal ~blit
+	+code
+	ldy #0
+	lda (_ri),y
+	ldx #0
+	+dpush
+	inc _ri
+	bne blit_1
+	inc _ri+1
+blit_1:
+	jmp next
+
 ; ==============================================================================
 ; Numeric output. Forth approach is a bit odd but extremely powerful
 
@@ -1832,15 +1880,15 @@ qdup_1:
 
 +header ~hash, ~hash_n, bhash_n, 1, "#"
 	+forth
-	+token base, peek, udmod, rot, lit
-	+value '0'
+	+token base, peek, udmod, rot, blit
+	+bvalue '0'
 	+token add
-	+token dup, lit
-	+value '9'
-	+token greater, qbranch
-	+address hash_1
-	+token lit
-	+value 7
+	+token dup, blit
+	+bvalue '9'
+	+token greater, qbbranch
+	+baddress hash_1
+	+token blit
+	+bvalue 7
 	+token add
 hash_1:
 	+token hold, exit
@@ -1871,8 +1919,8 @@ hashs_1:
 +header ~holds, ~holds_n, hold_n, 5, "HOLDS"
 	+forth
 holds_1:
-	+token dup, qbranch
-	+address holds_2
+	+token dup, qbbranch
+	+baddress holds_2
 	+token oneminus, twodup, add, cpeek, hold, branch
 	+address holds_1
 holds_2:
@@ -1880,10 +1928,10 @@ holds_2:
 
 +header ~sign, ~sign_n, holds_n, 4, "SIGN"
 	+forth
-	+token zerolt, qbranch
-	+address sign_1
-	+token lit
-	+value '-'
+	+token zerolt, qbbranch
+	+baddress sign_1
+	+token blit
+	+bvalue '-'
 	+token hold
 sign_1:
 	+token exit
@@ -1929,14 +1977,14 @@ sign_1:
 
 +header ~decimal, ~decimal_n, dot_n, 7, "DECIMAL"
 	+forth
-	+token lit
-	+value 10
+	+token blit
+	+bvalue 10
 	+token base, poke, exit
 
 +header ~hex, ~hex_n, decimal_n, 3, "HEX"
 	+forth
-	+token lit
-	+value 16
+	+token blit
+	+bvalue 16
 	+token base, poke, exit
 
 ; ==============================================================================
@@ -1988,7 +2036,7 @@ sign_1:
 
 +header ~branch, ~branch_n, ccomma_n, 6 + NST_FLAG, "BRANCH"
 	+code
-branch_c
+branch_c:
 	ldy #1
 	lda (_ri),y
 	tax
@@ -2008,6 +2056,34 @@ branch_c
 	+stax _ri
 	jmp next
 
+; potentially saving a few byte by switching to short relative forward offsets in branches (majority of them)
++header_internal ~bbranch
+	+code
+bbranch_c:
+	ldy #0
+	lda (_ri),y
+	clc
+	adc _ri
+	sta _ri
+	tya
+	adc _ri+1
+	sta _ri+1
+	jmp next
+	
++header_internal ~qbbranch
+	+code
+	+dpop
+	stx _rscratch
+	ora _rscratch
+	beq bbranch_c
+	inc _ri
+	bne qbbranch_1
+	inc _ri+1
+qbbranch_1:
+	jmp next
+
+	
+	
 ; ==============================================================================
 ; Line input support
 
@@ -2077,27 +2153,27 @@ accept_2:
 ; Note that slightly longer lines are being read from file
 +header ~refill, ~refill_n, key_n, 6, "REFILL"
 	+forth
-	+token sourceid, zerolt, qbranch
-	+address refill_1
+	+token sourceid, zerolt, qbbranch
+	+baddress refill_1
 	+token false, exit	; "EVALUATE" - no refill
 refill_1:
-	+token sourceid, zeroeq, qbranch
-	+address refill_2
+	+token sourceid, zeroeq, qbbranch
+	+baddress refill_2
 	+token cr, lit
 	+value prompt
-	+token count, type, cr, tib, lit
-	+value 80
+	+token count, type, cr, tib, blit
+	+bvalue 80
 	+token accept, numtib, poke, zero, ptrin, poke, true, exit	; console
 refill_2:
 	+token sourceid, fileposition, drop, lit
 	+value _source
-	+token peek, lit
-	+value 10
+	+token peek, blit
+	+bvalue 10
 	+token add, twopoke
-	+token tib, lit
-	+value 98
-	+token sourceid, readline, zeroeq, and_op, qbranch
-	+address refill_3
+	+token tib, blit
+	+bvalue 98
+	+token sourceid, readline, zeroeq, and_op, qbbranch
+	+baddress refill_3
 	+token numtib, poke, zero, ptrin, poke, true, exit	 ; file (note that the position is saved _before_ the refill)
 refill_3:
 	+token drop, false, exit
@@ -2119,8 +2195,8 @@ prompt:
 	+value _source
 	+token peek, dup, tor, peek
 saveinput_1:
-	+token dup, qbranch
-	+address saveinput_2
+	+token dup, qbbranch
+	+baddress saveinput_2
 	+token dup, twomult, rat, add, peek, swap, oneminus, branch
 	+address saveinput_1
 saveinput_2:
@@ -2128,18 +2204,18 @@ saveinput_2:
 
 +header ~restoreinput, ~restoreinput_n, saveinput_n, 13, "RESTORE-INPUT"
 	+forth
-	+token over, sourceid, equal, qbranch
-	+address restoreinput_3
-	+token sourceid, zerogt, qbranch
-	+address restoreinput_1
-	+token lit
-	+value 6
-	+token pick, lit
-	+value 6
+	+token over, sourceid, equal, qbbranch
+	+baddress restoreinput_3
+	+token sourceid, zerogt, qbbranch
+	+baddress restoreinput_1
+	+token blit
+	+bvalue 6
+	+token pick, blit
+	+bvalue 6
 	+token pick, sourceid, repositionfile, refill, twodrop
 restoreinput_1:
-	+token dup, qbranch
-	+address restoreinput_2
+	+token dup, qbbranch
+	+baddress restoreinput_2
 	+token dup, roll, over, twomult, lit
 	+value _source
 	+token peek, add, poke, oneminus, branch
@@ -2160,8 +2236,8 @@ restoreinput_3:
 
 +header ~cr, ~cr_n, emit_n, 2, "CR"
 	+forth
-	+token lit
-	+value NEW_LINE
+	+token blit
+	+bvalue NEW_LINE
 	+token emit, exit
 
 +header ~bl, ~bl_n, cr_n, 2, "BL"
@@ -2175,8 +2251,8 @@ restoreinput_3:
 +header ~type, ~type_n, space_n, 4, "TYPE"
 	+forth
 type_1:
-	+token dup, zerone, qbranch
-	+address type_done
+	+token dup, zerone, qbbranch
+	+baddress type_done
 	+token oneminus, swap, dup, cpeek, emit, oneplus, swap, branch
 	+address type_1
 type_done:
@@ -2193,12 +2269,12 @@ type_done:
 	+forth
 	+token tor, source, swap, ptrin, peek, add
 word_1:
-	+token over, ptrin, peek, greater, qbranch
-	+address word_2
-	+token dup, cpeek, lit
-	+value 127 ; a workaround for peculiar C64 annoyance
-	+token and_op, rat, equal, qbranch
-	+address word_2
+	+token over, ptrin, peek, greater, qbbranch
+	+baddress word_2
+	+token dup, cpeek, blit
+	+bvalue 127 ; a workaround for peculiar C64 annoyance
+	+token and_op, rat, equal, qbbranch
+	+baddress word_2
 	+token ptrin, peek, oneplus, ptrin, poke, oneplus, branch
 	+address word_1
 word_2:
@@ -2216,12 +2292,12 @@ word_2:
 	+token tor, source, ptrin, peek, sub
 	+token oneplus, tor, ptrin, peek, add, dup, zero
 parse_1:
-	+token over, cpeek, rfrom, oneminus, dup, qbranch
-	+address parse_3
-	+token swap, lit
-	+value 127
-	+token and_op, rat, equal, qbranch
-	+address parse_2 ; SAME AS ABOVE
+	+token over, cpeek, rfrom, oneminus, dup, qbbranch
+	+baddress parse_3
+	+token swap, blit
+	+bvalue 127
+	+token and_op, rat, equal, qbbranch
+	+baddress parse_2 ; SAME AS ABOVE
 	+token drop, swap, drop, rdrop, ptrin
 	+token dup, peek, oneplus, swap, poke, exit
 parse_2:
@@ -2235,10 +2311,10 @@ parse_3:
 	+forth
 	+token source, swap, ptrin, peek, add
 parsename_1:
-	+token over, ptrin, peek, greater, qbranch
-	+address parsename_2
-	+token dup, cpeek, bl, equal, qbranch
-	+address parsename_2
+	+token over, ptrin, peek, greater, qbbranch
+	+baddress parsename_2
+	+token dup, cpeek, bl, equal, qbbranch
+	+baddress parsename_2
 	+token ptrin, peek, oneplus, ptrin, poke, oneplus, branch
 	+address parsename_1
 parsename_2:
@@ -2251,12 +2327,12 @@ parsename_2:
 	+forth
 	+token oneminus, zero
 lfatonfa_1:
-	+token over, cpeek, lit
-	+value NAMEMASK
-	+token and_op, over, notequal, qbranch
-	+address lfatonfa_2
-	+token swap, oneminus, swap, oneplus, dup, lit
-	+value 32
+	+token over, cpeek, blit
+	+bvalue NAMEMASK
+	+token and_op, over, notequal, qbbranch
+	+baddress lfatonfa_2
+	+token swap, oneminus, swap, oneplus, dup, blit
+	+bvalue 32
 	+token equal, qbranch
 	+address lfatonfa_1
 	+token drop, drop, zero, exit
@@ -2264,8 +2340,16 @@ lfatonfa_2:
 	+token drop, exit
 
 +header ~tobody, ~tobody_n, lfatonfa_n, 5, ">BODY"
-	+forth
-	+token oneplus, twoplus, exit
+	+code
+	ldy #0
+	lda (_dtop),y
+	cmp #JMP_INSTR
+	bne tobody_1
+	+inc16 _dtop
+	+inc16 _dtop
+tobody_1:
+	+inc16 _dtop
+	jmp next
 
 +header ~context, ~context_n, tobody_n, 7 + NST_FLAG, "CONTEXT"
 	+code doconst
@@ -2350,18 +2434,18 @@ compare_next3:
 	jmp compare_loop
 
 
-+header ~strict, ~strict_n, compare_n, 6 + NST_FLAG, "STRICT"
-	+forth
-	+token true, lit
-	+value _strict
-	+token poke, exit
-
-; The only non-standard word that is visible in "strict" mode
-+header ~extended, ~extended_n, strict_n, 8, "EXTENDED"
-	+forth
-	+token false, lit
-	+value _strict
-	+token poke, exit
+;+header ~strict, ~strict_n, compare_n, 6 + NST_FLAG, "STRICT"
+;	+forth
+;	+token true, lit
+;	+value _strict
+;	+token poke, exit
+;
+;; The only non-standard word that is visible in "strict" mode
+;+header ~extended, ~extended_n, strict_n, 8, "EXTENDED"
+;	+forth
+;	+token false, lit
+;	+value _strict
+;	+token poke, exit
 
 ;
 ; : (find) (;code) nonstandard
@@ -2375,7 +2459,7 @@ compare_next3:
 ; Performance of FIND is critical for the interpretation speed, so it is worth to rewrite it in assembly. (FIND) is scanning through
 ; the vocabulary, so it has much higher impact
 
-+header ~xfind, ~xfind_n, extended_n, 6 + NST_FLAG, "(FIND)"		; caddr, n -> NFA | 0
++header ~xfind, ~xfind_n, compare_n, 6 + NST_FLAG, "(FIND)"		; caddr, n -> NFA | 0
 	+code
 	+dpop
 	sta _scratch
@@ -2399,17 +2483,29 @@ xfind_cmpchar:
 	beq xfind_cmpchar	; same char, continue. otherwise, next word
 
 xfind_nextword:
+	lda #0
+	sta _wscratch+1
 	txa					; expect current length in X
 	tay
 	iny					; name + name byte, now pointing at the LFA
 	lda (_rscratch),y
-	tax
+	beq xfind_nomorewords
+	bpl xfind_offsetok
+	and #$7f
+	sta _wscratch+1
 	iny
 	lda (_rscratch),y
-	beq xfind_nomorewords	; there is no way any words reside in the zero page
-	sta _rscratch+1
-	txa
+xfind_offsetok:
+	sta _wscratch
+
+	sec
+	lda _rscratch
+	sbc _wscratch
 	sta _rscratch
+	lda _rscratch+1
+	sbc _wscratch+1
+	sta _rscratch+1
+	
 	jmp xfind_compare
 
 xfind_nomorewords:
@@ -2423,17 +2519,35 @@ xfind_found:
 	jmp next
 
 
++header_internal ~lfatocfa
+	+code
+	ldy #0
+	lda (_dtop),y
+	bpl lfatocfa_1
+	iny
+lfatocfa_1:
+	iny
+	tya
+	clc
+	adc _dtop
+	sta _dtop
+	bcc lfatocfa_2
+	inc _dtop+1
+lfatocfa_2:
+	jmp next
+
+
 +header ~find, ~find_n, xfind_n, 4, "FIND"
 	+forth
-	+token dup, tor, count, xfind, dup, qbranch
-	+address find_1
-	+token rdrop, dup, count, lit
-	+value NAMEMASK
-	+token and_op, add, twoplus
-	+token swap, cpeek, lit
-	+value IMM_FLAG
-	+token and_op, minusone, swap, qbranch
-	+address find_2
+	+token dup, tor, count, xfind, dup, qbbranch
+	+baddress find_1
+	+token rdrop, dup, count, blit
+	+bvalue NAMEMASK
+	+token and_op, add, lfatocfa
+	+token swap, cpeek, blit
+	+bvalue IMM_FLAG
+	+token and_op, minusone, swap, qbbranch
+	+baddress find_2
 	+token negate, exit
 find_1:
 	+token rfrom, swap
@@ -2442,72 +2556,43 @@ find_2:
 
 +header ~immediate, ~immediate_n, find_n, 9, "IMMEDIATE"
 	+forth
-	+token latest, dup, cpeek, lit
-	+value IMM_FLAG
+	+token latest, dup, cpeek, blit
+	+bvalue IMM_FLAG
 	+token or, swap, cpoke, exit
 
-+header ~nonstandard, ~nonstandard_n, immediate_n, 11 + NST_FLAG, "NONSTANDARD"
-	+forth
-	+token latest, dup, cpeek, lit
-	+value IMM_FLAG
-	+token or, swap, cpoke, exit
+;+header ~nonstandard, ~nonstandard_n, immediate_n, 11 + NST_FLAG, "NONSTANDARD"
+;	+forth
+;	+token latest, dup, cpeek, blit
+;	+bvalue NST_FLAG
+;	+token or, swap, cpoke, exit
 
-+header ~xdigit, ~xdigit_n, nonstandard_n, 7 + NST_FLAG, "(DIGIT)"
-	+forth
-	+token dup, lit
-	+value 48
-	+token less, qbranch
-	+address xdigit_1
-xdigit_x:
-	+token drop, minusone, exit
-xdigit_1:
-	+token dup, lit
-	+value 58
-	+token less, qbranch
-	+address xdigit_2
-	+token lit
-	+value 48
-	+token sub, exit ; '0'-'9'
++header ~xdigit, ~xdigit_n, immediate_n, 7 + NST_FLAG, "(DIGIT)"
+	+code
+	lda _dtop
+	+sub '0'
+	cmp #10
+	bmi xdigit_1
+	+sub 'A'-'0'-10
+	cmp _base
+	bpl xdigit_2
+	cmp #0
+	bpl xdigit_1
 xdigit_2:
-	+token dup, lit
-	+value 65
-	+token less, qbranch
-	+address xdigit_3
-	+token branch
-	+address xdigit_x
-xdigit_3:
-	+token dup, lit
-	+value 91
-	+token less, qbranch
-	+address xdigit_4
-	+token lit
-	+value 55
-	+token sub, exit ; 'A'-'Z'
-xdigit_4:
-	+token dup, lit
-	+value 97
-	+token less, qbranch
-	+address xdigit_5
-	+token branch
-	+address xdigit_x
-xdigit_5:
-	+token dup, lit
-	+value 123
-	+token less, qbranch
-	+address xdigit_x
-	+token lit
-	+value 87
-	+token sub, exit ; 'a'-'z'
+	lda #255
+	sta _dtop+1
+xdigit_1:
+	sta _dtop
+	jmp next
 
 +header ~tonumber, ~tonumber_n, xdigit_n, 7, ">NUMBER"
 	+forth
 tonumber_1:
-	+token dup, zerogt, qbranch
-	+address tonumber_3									; no more digits left?
-	+token over, cpeek, xdigit, dup, zerolt, zeroeq, qbranch
-	+address tonumber_2	; not a possible digit?
-	+token dup, base, peek, less, qbranch
-	+address tonumber_2						; not a digit in current base?
+	+token dup, zerogt, qbbranch
+	+baddress tonumber_3									; no more digits left?
+	+token over, cpeek, xdigit, dup, zerolt, zeroeq, qbbranch
+	+baddress tonumber_2	; not a possible digit?
+	+token dup, base, peek, less, qbbranch
+	+baddress tonumber_2						; not a digit in current base?
 	+token swap, oneminus, tor, swap, oneplus, tor, tor
 	+token base, peek, udmult, rfrom, mplus, rfrom, rfrom
 	+token branch
@@ -2520,72 +2605,72 @@ tonumber_3:
 +header ~number, ~number_n, tonumber_n, 6 + NST_FLAG, "NUMBER"
 	+forth
 	+token count, base, peek, tor
-	+token dup, lit
-	+value 3
-	+token equal, two, pick, cpeek, lit
-	+value 39
+	+token dup, blit
+	+bvalue 3
+	+token equal, two, pick, cpeek, blit
+	+bvalue 39
 	+token equal, and_op			; character as 'c'
-	+token two, pick, two, add, cpeek, lit
-	+value 39
-	+token equal, and_op, qbranch
-	+address number_8
-	+token drop, oneplus, cpeek, branch
-	+address number_5
+	+token two, pick, two, add, cpeek, blit
+	+bvalue 39
+	+token equal, and_op, qbbranch
+	+baddress number_8
+	+token drop, oneplus, cpeek, bbranch
+	+baddress number_5
 number_8:
-	+token dup, one, greater, qbranch
-	+address number_9
-	+token over, cpeek, lit
-	+value 35
-	+token equal, qbranch
-	+address number_11
-	+token decimal, branch
-	+address number_10
+	+token dup, one, greater, qbbranch
+	+baddress number_9
+	+token over, cpeek, blit
+	+bvalue 35
+	+token equal, qbbranch
+	+baddress number_11
+	+token decimal, bbranch
+	+baddress number_10
 number_11:
-	+token over, cpeek, lit
-	+value 36
-	+token equal, qbranch
-	+address number_12
-	+token hex, branch
-	+address number_10
+	+token over, cpeek, blit
+	+bvalue 36
+	+token equal, qbbranch
+	+baddress number_12
+	+token hex, bbranch
+	+baddress number_10
 number_12:
-	+token over, cpeek, lit
-	+value 37
-	+token equal, qbranch
-	+address number_9
+	+token over, cpeek, blit
+	+bvalue 37
+	+token equal, qbbranch
+	+baddress number_9
 	+token two, base, poke
 number_10:
 	+token swap, oneplus, swap, oneminus
 number_9:
-	+token twodup, false, tor, over, cpeek, lit
-	+value 45
-	+token equal, qbranch
-	+address number_1
+	+token twodup, false, tor, over, cpeek, blit
+	+bvalue 45
+	+token equal, qbbranch
+	+baddress number_1
 	+token rdrop, true, tor, oneminus, swap, oneplus, swap
 number_1:
-	+token zero, dup, twoswap, tonumber, dup, qbranch
-	+address number_4
-	+token one, equal, swap, cpeek, lit
-	+value 46
-	+token equal, and_op, qbranch
-	+address number_7	; one unconverted char and it's '.'?
-	+token rfrom, qbranch
-	+address number_2
+	+token zero, dup, twoswap, tonumber, dup, qbbranch
+	+baddress number_4
+	+token one, equal, swap, cpeek, blit
+	+bvalue 46
+	+token equal, and_op, qbbranch
+	+baddress number_7	; one unconverted char and it's '.'?
+	+token rfrom, qbbranch
+	+baddress number_2
 	+token dnegate
 number_2:
-	+token twoswap, twodrop, state, peek, qbranch
-	+address number_3
+	+token twoswap, twodrop, state, peek, qbbranch
+	+baddress number_3
 	+token compile, lit, swap
 	+token comma, compile, lit, comma
 number_3:
-	+token branch
-	+address number_6
+	+token bbranch
+	+baddress number_6
 number_4:
-	+token twodrop, twoswap, twodrop, drop, rfrom, qbranch
-	+address number_5
+	+token twodrop, twoswap, twodrop, drop, rfrom, qbbranch
+	+baddress number_5
 	+token negate
 number_5:
-	+token state, peek, qbranch
-	+address number_6
+	+token state, peek, qbbranch
+	+baddress number_6
 	+token compile, lit, comma
 number_6:
 	+token rfrom, base, poke, exit
@@ -2597,30 +2682,59 @@ number_7:
 ; ==============================================================================
 ; Nice service word that prints the entire list of supported words.
 
++header_internal ~nextword ; CURRENT, LFA -> PREV
+	+code
+	ldy #0
+	sty _scratch+1
+	lda (_dtop),y
+	bne nextword_1
+	sty _dtop
+	sty _dtop+1
+	beq nextword_x
+nextword_1:
+	bpl nextword_2
+	and #$7F
+	sta _scratch+1
+	iny
+	lda (_dtop),y
+nextword_2:
+	sta _scratch
+	+dpop
+	sec
+	lda _dtop
+	sbc _scratch
+	sta _dtop
+	lda _dtop+1
+	sbc _scratch+1
+	sta _dtop+1
+nextword_x:
+	jmp next
+
 ; In optional Programming-Tools word set
 +header ~words, ~words_n, number_n, 5, "WORDS"
 	+forth
 	+token zero, context, peek
 words_1:
-	+token dup, count, dup, lit
-	+value NST_FLAG
+	+token dup, count, dup, blit
+	+bvalue NST_FLAG
 	+token and_op, lit
 	+value _strict
 	+token peek, and_op, swap
-	+token lit
-	+value NAMEMASK
-	+token and_op, dup, tor, swap, zeroeq, qbranch
-	+address words_2
-	+token dup, zerone, qbranch
-	+address words_2
-	+token type, bl, emit, swap, oneplus, swap, branch
-	+address words_3
+	+token blit
+	+bvalue NAMEMASK
+	+token and_op, dup, tor, swap, zeroeq, qbbranch
+	+baddress words_2
+	+token dup, zerone, qbbranch
+	+baddress words_2
+	+token type, bl, emit, swap, oneplus, swap, bbranch
+	+baddress words_3
 words_2:
 	+token twodrop
 words_3:
-	+token rfrom, oneplus, add, peek, dup, zeroeq, qbranch
+	+token dup, rfrom, oneplus, add, nextword
+	+token dup, zeroeq, qbranch
 	+address words_1
-	+token drop, cr, dot, lit
+	+token drop, drop, cr, dot, lit
 	+value words_n
 	+token count, type, exit
 
@@ -2633,16 +2747,8 @@ words_3:
 
 +header ~qcomp, ~qcomp_n, state_n,  5 + NST_FLAG, "?COMP"
 	+forth
-	+token state, peek, zeroeq, qbranch
-	+address qcomp_2
-	+token rat, twominus, twominus, dup, peek, lit
-	+value call
-	+token equal, qbranch
-	+address qcomp_1	; if ?COMP immediately follows CALL
-	+token oneminus, twominus, lfatonfa, count, lit
-	+value NAMEMASK
-	+token and_op, type, space					; output the word name with error
-qcomp_1:
+	+token state, peek, zeroeq, qbbranch
+	+baddress qcomp_2
 	+token xabortq
 	+string 20, "REQUIRES COMPILATION"
 qcomp_2:
@@ -2652,8 +2758,8 @@ qcomp_2:
 	+forth
 	+token depth, dup, zerolt, swap, lit
 	+value STACKLIMIT
-	+token greater, or, qbranch
-	+address qstack_1
+	+token greater, or, qbbranch
+	+baddress qstack_1
 	+token xabortq
 	+string 11, "STACK FAULT"
 qstack_1:
@@ -2662,14 +2768,14 @@ qstack_1:
 +header ~interpret, ~interpret_n, qstack_n, 9 + NST_FLAG, "INTERPRET"
 	+forth
 interpret_1:
-	+token qstack, bl, word, dup, cpeek, qbranch
-	+address interpret_done	; get the next word if any
-	+token state, peek, qbranch
-	+address interpret_int
-	+token find, dup, qbranch
-	+address comp_num
-	+token zerolt, qbranch
-	+address comp_imm		; compiling now
+	+token qstack, bl, word, dup, cpeek, qbbranch
+	+baddress interpret_done	; get the next word if any
+	+token state, peek, qbbranch
+	+baddress interpret_int
+	+token find, dup, qbbranch
+	+baddress comp_num
+	+token zerolt, qbbranch
+	+baddress comp_imm		; compiling now
 	+token comma, branch
 	+address interpret_1		; regular word in compile mode
 comp_imm:
@@ -2679,8 +2785,8 @@ comp_num:
 	+token drop, number, branch
 	+address interpret_1
 interpret_int:
-	+token find, qbranch
-	+address int_num			; interpreting now
+	+token find, qbbranch
+	+baddress int_num			; interpreting now
 	+token execute, branch
 	+address interpret_1		; any word in interpreter mode
 int_num:
@@ -2693,10 +2799,10 @@ interpret_done:
 
 +header ~closesource, ~closesource_n, interpret_n, 12 + NST_FLAG, "CLOSE-SOURCE"
 	+forth
-	+token sourceid, zerone, qbranch
-	+address closesource_2						; nothing to do with console source
-	+token sourceid, zerogt, qbranch
-	+address closesource_1
+	+token sourceid, zerone, qbbranch
+	+baddress closesource_2						; nothing to do with console source
+	+token sourceid, zerogt, qbbranch
+	+baddress closesource_1
 	+token sourceid, closefile, drop, minusone, lit
 	+value _ibufcount
 	+token incpoke		; close file and release the buffer
@@ -2717,64 +2823,104 @@ closesource_2:
 	+token twominus, swap, over, poke
 	+token twominus, zero, over, poke
 	+token twominus, minusone, over, poke
-	+token twominus, lit
-	+value 4
+	+token twominus, blit
+	+bvalue 4
 	+token over, poke
 	+token lit
 	+value _source
 	+token poke
-	+token state, qbranch
-	+address evaluate_1
+	+token state, qbbranch
+	+baddress evaluate_1
 	+token interpret
 evaluate_1:
 	+token exit
 
 ; ==============================================================================
 ; Colon definition and related words
-
+; (CREATE) takes cstr,n and creates a raw header (NFA+LFA)
 +header ~xcreate, ~xcreate_n, evaluate_n, 8 + NST_FLAG, "(CREATE)"
-	+forth
-	+token here, tor
-	+token dup, lit
-	+value 32
-	+token greater, qbranch
-	+address xcreate_1
-	+token drop, lit
-	+value 31 ; limit the word to 31 characters
-xcreate_1:
-	+token dup, ccomma, rat, oneplus, swap, dup, allot, cmove	; set NFA
-	+token latest, comma										; set LFA
-	+token rfrom, lit
-	+value _latest
-	+token poke
-	+token lit
-	+value JMP_INSTR	; for direct threading!
-	+token ccomma
-	+token lit
-	+value created
-	+token comma									; set CFA to a special code that pushes PFA on the stack
-	+token latest, context, poke, exit							; and add to the search order
+	+code
+	
+	sec				; contents for the new LFA
+	lda _here
+	sbc _latest
+	sta _wscratch
+	lda _here+1
+	sbc _latest+1
+	sta _wscratch+1
+	
+	+ldax _here		; register the word as LATEST and CONTEXT
+	+stax _latest
+	+stax _context
+	
+	+dpop
+	and #NAMEMASK
+	ldy #0
+	sta (_here),y
+	iny
+	tax
+	beq xcreate_5
+	lda _dtop
+	bne xcreate_3
+	dec _dtop+1
+xcreate_3:
+	dec _dtop
+	
+xcreate_1:			; copy name string
+	lda (_dtop),y
+	sta (_here),y
+	iny
+	dex
+	bne xcreate_1
+	
+xcreate_5:
+	lda _wscratch	; write LFA
+	and #$80
+	ora _wscratch+1	; >= 128?
+	beq xcreate_4
+	lda _wscratch+1
+	ora #$80
+	sta (_here),y
+	iny
+xcreate_4:
+	lda _wscratch
+	sta (_here),y
+	iny
+	
+	tya
+	clc				; update HERE
+	adc _here
+	sta _here
+	bcc xcreate_2
+	inc _here+1
+xcreate_2:
+	+dpop
+	jmp next
 
 +header ~create, ~create_n, xcreate_n, 6, "CREATE"
 	+forth
-	+token bl, word, count, xcreate, exit
+	+token bl, word, count, xcreate, blit
+	+bvalue JMP_INSTR
+	+token ccomma, lit
+	+value created
+	+token comma, exit
 
 ; DOES> is a weird beast. It generates code that will modify the execution of the
 ; last defined word to jump to the definition word. It is also quite non-portable as it generates a low level instruction
 +header ~xcode, ~xcode_n, create_n, 7 + NST_FLAG, "(;CODE)"
 	+forth
 	+token rfrom										; which is the address of the "call xdoes" instruction
-	+token latest, count, lit
-	+value NAMEMASK
-	+token and_op, add, twoplus	; CFA of the last defined word
+	+token latest, count, blit
+	+bvalue NAMEMASK
+	+token and_op, add, lfatocfa ;twoplus	; CFA of the last defined word
 	+token oneplus ; PFA (!)
 	+token poke, exit										; and this will actually exit the defining word
 
 ; Note that while DOES> looks like high-level word its implementation is depended on the opcode for native CALL/JSR
 +header ~doesx, ~doesx_n, xcode_n, 5 + IMM_FLAG, "DOES>"
 	+forth
-	+token qcomp, compile, xcode, lit
-	+value JSR_INSTR
+	+token qcomp, compile, xcode, blit
+	+bvalue JSR_INSTR
 	+token ccomma, lit
 	+value does
 	+token comma, exit	; compile (;CODE) followed by "call does_c"
@@ -2782,11 +2928,13 @@ xcreate_1:
 ; Note that colon will remove the word from the search order (to be restored by semicolon)
 +header ~colon, ~colon_n, doesx_n, 1, ":"
 	+forth
-	+token create
-	+token lit
-	+value call
-	+token here, twominus, dup, tor, poke, rfrom
-	+token oneminus, twominus, peek, context, poke, bracketx, exit
+	+token latest							; save LATEST before creating a new word
+	+token bl, word, count
+	+token xcreate
+	+token blit
+	+bvalue RTS_INSTR
+	+token ccomma
+	+token context, poke, bracketx, exit
 
 ; Words defined with :NONAME technically don't need to be linked in the vocabulary but if it is done that way RECURSE becomes harder
 ; to implement. It is easier just to link the word with emtpy name. In this implementation it has an unusual side effect that FIND
@@ -2799,17 +2947,14 @@ xcreate_1:
  
 +header ~colonnoname, ~colonnoname_n, colon_n, 7, ":NONAME"
 	+forth
-	+token here, zero, ccomma			; set 0-length NFA
-	+token latest, comma, lit
-	+value _latest
-	+token poke		; LFA
-	+token here
-	+token lit
-	+value JMP_INSTR
+	+token latest							; save LATEST before creating a new word
+	+token zero, dup
+	+token xcreate
+	+token here, tor
+	+token blit
+	+bvalue RTS_INSTR
 	+token ccomma
-	+token lit
-	+value call
-	+token comma, bracketx, exit	; CFA and keep the address on stack
+	+token context, poke, bracketx, rfrom, exit
 
 +header ~bufferc, ~bufferc_n, colonnoname_n, 7, "BUFFER:"
 	+forth
@@ -2831,7 +2976,8 @@ xcreate_1:
 	+forth
 	+token create, comma, xcode
 	!byte JSR_INSTR
-	+token does, peek, exit
+	+address does
+	+token peek, exit
 
 +header ~defer, ~defer_n, constant_n, 5, "DEFER"
 	+forth
@@ -2843,8 +2989,8 @@ xcreate_1:
 	+forth
 	+token dup, oneplus, peek, lit
 	+value dodefer
-	+token equal, qbranch
-	+address qdefer_1
+	+token equal, qbbranch
+	+baddress qdefer_1
 	+token exit
 qdefer_1:
 	+token xabortq
@@ -2860,16 +3006,16 @@ qdefer_1:
 
 +header ~actionof, ~actionof_n, deferpoke_n, 9 + IMM_FLAG, "ACTION-OF"
 	+forth
-	+token state, peek, qbranch
-	+address actionof_1
+	+token state, peek, qbbranch
+	+baddress actionof_1
 	+token btick, compile, deferpeek, exit
 actionof_1:
 	+token tick, deferpeek, exit
 
 +header ~is, ~is_n, actionof_n, 2 + IMM_FLAG, "IS"
 	+forth
-	+token state, peek, qbranch
-	+address is_1
+	+token state, peek, qbbranch
+	+baddress is_1
 	+token btick, compile, deferpoke, exit
 is_1:
 	+token tick, deferpoke, exit
@@ -2895,10 +3041,10 @@ value_sem:
 	+forth
 	+token bl, word, find, drop, oneplus, dup, peek, lit
 	+value dovalue
-	+token equal, qbranch
-	+address to_2
-	+token twoplus, dup, twoplus, swap, peek, state, peek, qbranch
-	+address to_1
+	+token equal, qbbranch
+	+baddress to_2
+	+token twoplus, dup, twoplus, swap, peek, state, peek, qbbranch
+	+baddress to_1
 	+token twoplus
 to_1:
 	+token twoplus, peek, execute, exit
@@ -2928,8 +3074,8 @@ to_2:
 ; it is supposed to do
 +header ~postpone, ~postpone_n, bcompile_n, 8 + IMM_FLAG, "POSTPONE"
 	+forth
-	+token qcomp, bl, word, find, one, equal, qbranch
-	+address postpone_1
+	+token qcomp, bl, word, find, one, equal, qbbranch
+	+baddress postpone_1
 	+token comma, exit
 postpone_1:
 	+token lit
@@ -2940,8 +3086,8 @@ postpone_1:
 ; will emit LIT followed by the value from the stack
 +header ~literal, ~literal_n, postpone_n, 7 + IMM_FLAG, "LITERAL"
 	+forth
-	+token qcomp, state, peek, qbranch
-	+address literal_1
+	+token qcomp, state, peek, qbbranch
+	+baddress literal_1
 	+token compile, lit, comma
 literal_1:
 	+token exit
@@ -2963,23 +3109,23 @@ literal_1:
 
 +header ~brace, ~brace_n, bracketx_n, 1 + IMM_FLAG, "("
 	+forth
-	+token sourceid, zerogt, qbranch
-	+address brace_2
+	+token sourceid, zerogt, qbbranch
+	+baddress brace_2
 brace_1:
-	+token lit
-	+value ')'
+	+token blit
+	+bvalue ')'
 	+token parse, twodrop, ptrin, peek, numtib, peek, equal
-	+token tib, numtib, peek, add, oneminus, cpeek, lit
-	+value ')'
+	+token tib, numtib, peek, add, oneminus, cpeek, blit
+	+bvalue ')'
 	+token notequal, and_op
-	+token qbranch
-	+address brace_3
+	+token qbbranch
+	+baddress brace_3
 	+token refill, invert, qbranch
 	+address brace_1
 	+token exit
 brace_2:
-	+token lit
-	+value ')'
+	+token blit
+	+bvalue ')'
 	+token parse, twodrop
 brace_3:
 	+token exit
@@ -2990,14 +3136,14 @@ brace_3:
 
 +header ~dotbrace, ~dotbrace_n, backslash_n, 2 + IMM_FLAG, ".("
 	+forth
-	+token lit
-	+value ')'
+	+token blit
+	+bvalue ')'
 	+token parse, type, exit
 
 +header ~commaquote, ~commaquote_n, dotbrace_n, 2 + NST_FLAG, ",\""
 	+forth
-	+token lit
-	+value '"'
+	+token blit
+	+bvalue '"'
 	+token parse, dup, ccomma, here
 	+token over, allot, swap, cmove, exit
 
@@ -3009,18 +3155,18 @@ brace_3:
 
 +header ~squote, ~squote_n, cquote_n, 2 + IMM_FLAG, "S\""
 	+forth
-	+token state, peek, zerone, qbranch
-	+address squote_1
+	+token state, peek, zerone, qbbranch
+	+baddress squote_1
 	+token cquote, compile, count, exit
 squote_1:
-	+token lit
-	+value '"'
+	+token blit
+	+bvalue '"'
 	+token parse, lit
 	+value _sbuf
 	+token lit
 	+value _sflip
-	+token peek, lit
-	+value 100
+	+token peek, blit
+	+bvalue 100
 	+token mult, add, swap, twotor, tworat, cmove
 	+token tworfrom, lit
 	+value _sflip
@@ -3032,16 +3178,16 @@ squote_1:
 	+value _sbuf
 	+token lit
 	+value _sflip
-	+token peek, lit
-	+value 100
+	+token peek, blit
+	+bvalue 100
 	+token mult, add, numtib, peek
 	+token ptrin, peek, sub, over, tor
 	+token smove, swap, ptrin, incpoke
 	+token rfrom, swap, lit
 	+value _sflip
 	+token dup, peek, one, xor, swap, poke
-	+token state, peek, qbranch
-	+address ssquote_1
+	+token state, peek, qbbranch
+	+baddress ssquote_1
 	+token compile, branch, fmark
 	+token here, two, pick, dup, ccomma, allot, swap, fresolve
 	+token compile, lit, dup
@@ -3075,35 +3221,36 @@ ssquote_1:
 	+token qcomp, compile, qbranch, fmark
 	+token compile, xabortq, commaquote, fresolve, exit
 
++header_internal ~xforget	; caddr -> (delete all words from this address)
+	+forth
+	+token dup, lit
+	+value _here
+	+token poke, dup, dup, cpeek, blit
+	+bvalue NAMEMASK
+	+token and_op, add, oneplus, nextword, dup
+	+token lit
+	+value _latest
+	+token poke, context, poke, exit
+
 ; In optional Programming-Tools word set
 +header ~forget, ~forget_n, abortq_n, 6, "FORGET"
 	+forth
-	+token bl, word, find, zerone, qbranch
-	+address forget_1
-	+token twominus, dup, peek, dup, lit
-	+value _latest
-	+token poke, context, poke
-	+token lfatonfa, lit
-	+value _here
-	+token poke, exit
+	+token bl, word, count, xfind, dup, zerone, qbbranch
+	+baddress forget_1
+	+token xforget, exit
 forget_1:
 	+token drop, exit
 
 +header ~marker, ~marker_n, forget_n, 6, "MARKER"
 	+forth
-	+token create, xcode
+	+token create, latest, comma, xcode
 	!byte JSR_INSTR
-	+token does
-	+token oneminus, twominus, twominus, dup, peek, dup, lit
-	+value _latest
-	+token poke, context, poke
-	+token lfatonfa, lit
-	+value _here
-	+token poke, exit
+	+address does
+	+token peek, xforget, exit
 
 +header ~recurse, ~recurse_n, marker_n, 7 + IMM_FLAG, "RECURSE"
 	+forth
-	+token qcomp, latest, count, add, cellplus, comma, exit
+	+token qcomp, latest, count, add, lfatocfa, comma, exit
 
 ; ==============================================================================
 ; More control structure support
@@ -3182,8 +3329,8 @@ forget_1:
 
 +header ~xqdo, ~xqdo_n, xdo_n, 5 + NST_FLAG, "(?DO)"
 	+forth
-	+token twodup, equal, qbranch
-	+address xqdo_1
+	+token twodup, equal, qbbranch
+	+baddress xqdo_1
 	+token twodrop, rfrom, peek, tor, exit
 xqdo_1:
 	+token rfrom, dup, peek, tor	; forward ref for LEAVE
@@ -3196,8 +3343,8 @@ xqdo_1:
 	+forth
 	+token rfrom				; return address is only needed to get the backref
 	+token rfrom, oneplus			; new value of current
-	+token rat, over, equal, qbranch
-	+address xloop_1
+	+token rat, over, equal, qbbranch
+	+baddress xloop_1
 	+token drop, drop, rdrop, exit	; exit the loop (leaveaddr on the rstack)
 xloop_1:
 	+token tor, peek, tor, exit		; continue the loop
@@ -3209,8 +3356,8 @@ xloop_1:
 	+token rfrom, rat, sub			; diff limit and new current / addr, step, newcur, olddiff
 	+token rot, over, xor, zerolt, swap ; new diff and step have different signs? / addr, newcur, step^olddiff<0, olddiff
 	+token two, pick, rat, sub		; diff limit and previous current / addr, newcur, s^d, olddiff, newdiff
-	+token xor, zerolt, and_op, qbranch
-	+address xploop_1  ; or diffs before and after have different signs / newdiff^olddiff < 0
+	+token xor, zerolt, and_op, qbbranch
+	+baddress xploop_1  ; or diffs before and after have different signs / newdiff^olddiff < 0
 	+token drop, drop, rdrop, exit	; exit the loop (leaveaddr on the rstack)
 xploop_1:
 	+token tor, peek, tor, exit		; continue the loop
@@ -3268,8 +3415,8 @@ xploop_1:
 	+token qcomp, compile, drop, depth
 	+token rfrom, rfrom, swap, tor, sub
 endcase_1:
-	+token dup, qbranch
-	+address endcase_2
+	+token dup, qbbranch
+	+baddress endcase_2
 	+token oneminus, swap, fresolve, branch
 	+address endcase_1
 endcase_2:
@@ -3281,8 +3428,8 @@ endcase_2:
 +header ~spaces, ~spaces_n, endcase_n, 6, "SPACES"
 	+forth
 spaces_1:
-	+token dup, zerogt, qbranch
-	+address spaces_2
+	+token dup, zerogt, qbbranch
+	+baddress spaces_2
 	+token oneminus, space, branch
 	+address spaces_1
 spaces_2:
@@ -3316,8 +3463,8 @@ spaces_2:
 
 +header ~move, ~move_n, cmovex_n, 4, "MOVE"
 	+forth
-	+token rot, rot, twodup, less, qbranch
-	+address move_1
+	+token rot, rot, twodup, less, qbbranch
+	+baddress move_1
 	+token rot, cmovex, exit
 move_1:
 	+token rot, cmove, exit
@@ -3454,8 +3601,8 @@ smove_subst:
 	+forth
 	+token swap, tor, swap
 fill_1:
-	+token rfrom, dup, qbranch
-	+address fill_2
+	+token rfrom, dup, qbbranch
+	+baddress fill_2
 	+token oneminus, tor, twodup, cpoke, oneplus, branch
 	+address fill_1
 fill_2:
@@ -3475,8 +3622,8 @@ fill_2:
 
 +header ~sliteral, ~sliteral_n, blank_n, 8 + IMM_FLAG, "SLITERAL"
 	+forth
-	+token state, peek, qbranch
-	+address sliteral_1
+	+token state, peek, qbbranch
+	+baddress sliteral_1
 	+token compile, branch, fmark
 	+token rot, rot
 	+token dup, tor, here, dup, tor
@@ -3495,8 +3642,8 @@ sliteral_1:
 	+forth
 	+token depth
 dots_1:
-	+token dup, qbranch
-	+address dots_2
+	+token dup, qbbranch
+	+baddress dots_2
 	+token dup, pick, dot, oneminus, branch
 	+address dots_1
 dots_2:
@@ -3535,16 +3682,16 @@ dots_2:
 
 +header ~dmax, ~dmax_n, dequal_n, 4, "DMAX"
 	+forth
-	+token twoover, twoover, dless, qbranch
-	+address dmax_1
+	+token twoover, twoover, dless, qbbranch
+	+baddress dmax_1
 	+token twoswap
 dmax_1:
 	+token twodrop, exit
 
 +header ~dmin, ~dmin_n, dmax_n, 4, "DMIN"
 	+forth
-	+token twoover, twoover, dless, invert, qbranch
-	+address dmin_1
+	+token twoover, twoover, dless, invert, qbbranch
+	+baddress dmin_1
 	+token twoswap
 dmin_1:
 	+token twodrop, exit
@@ -3588,8 +3735,8 @@ whigh = _rscratch
 
 +header ~dtwodiv, ~dtwodiv_n, dadd_n, 3, "D2/"
 	+forth
-	+token dup, one, and_op, lit
-	+value 15
+	+token dup, one, and_op, blit
+	+bvalue 15
 	+token lshift, swap, twodiv, swap
 	+token rot, twodiv, or, swap, exit
 
@@ -3603,12 +3750,12 @@ whigh = _rscratch
 
 +header ~duless, ~duless_n, dtwomul_n, 3, "DU<"
 	+forth
-	+token rot, twodup, equal, qbranch
-	+address duless_1
+	+token rot, twodup, equal, qbbranch
+	+baddress duless_1
 	+token twodrop, uless, exit
 duless_1:
-	+token ugreater, qbranch
-	+address duless_2
+	+token ugreater, qbbranch
+	+baddress duless_2
 	+token twodrop, true, exit
 duless_2:
 	+token twodrop, false, exit
@@ -3629,12 +3776,12 @@ duless_2:
 
 +header ~dless, ~dless_n, dzeroless_n, 2, "D<"
 	+forth
-	+token rot, twodup, equal, qbranch
-	+address dless_1
+	+token rot, twodup, equal, qbbranch
+	+baddress dless_1
 	+token twodrop, uless, exit
 dless_1:
-	+token greater, qbranch
-	+address dless_2
+	+token greater, qbbranch
+	+baddress dless_2
 	+token twodrop, true, exit
 dless_2:
 	+token twodrop, false, exit
@@ -3655,7 +3802,8 @@ dless_2:
 	+forth
 	+token create, comma, comma, xcode
 	!byte JSR_INSTR
-	+token does, twopeek, exit
+	+address does
+	+token twopeek, exit
 
 ;
 ; : 2lit r@ 2@ r> 2+ 2+ >r ; nonstandard
@@ -3668,8 +3816,8 @@ dless_2:
 
 +header ~dliteral, ~dliteral_n, dlit_n, 8 + IMM_FLAG, "2LITERAL"
 	+forth
-	+token qcomp, state, peek, qbranch
-	+address dliteral_1
+	+token qcomp, state, peek, qbbranch
+	+baddress dliteral_1
 	+token compile, dlit
 	+token comma, comma
 dliteral_1:
@@ -3681,10 +3829,10 @@ dliteral_1:
 
 +header ~drot, ~drot_n, dliteral_n, 4, "2ROT"
 	+forth
-	+token lit
-	+value 5
-	+token roll, lit
-	+value 5
+	+token blit
+	+bvalue 5
+	+token roll, blit
+	+bvalue 5
 	+token roll, exit
 
 +header ~dvalue, ~dvalue_n, drot_n, 6, "2VALUE"
@@ -3728,77 +3876,20 @@ normsign:
 +header ~mmuldiv, ~mmuldiv_n, dvalue_n, 3, "M*/"
 	+forth
 	+token tor, normsign, rfrom, swap, tor, tor
-	+token tmult, rfrom, tdiv, rfrom, zerolt, qbranch
-	+address mmuldiv_1
+	+token tmult, rfrom, tdiv, rfrom, zerolt, qbbranch
+	+baddress mmuldiv_1
 	+token dnegate
 mmuldiv_1:
 	+token exit
 
 ; ==============================================================================
+; Per discussion on forth-standard.org, it appears that this word does not
+; have to provide any additional information. Given the overall bad specs and
+; high memory use for little purpose, shortwiring it
 
-+header ~env_counted, ~env_counted_n, mmuldiv_n, 15 + NST_FLAG, "/COUNTED-STRING"
++header ~environmentq, ~environmentq_n, mmuldiv_n, 12, "ENVIRONMENT?"
 	+code doconst
-	+value 255
-				
-+header ~env_hold, ~env_hold_n, env_counted_n, 5 + NST_FLAG, "/HOLD"
-	+code doconst
-	+value 98
-				
-+header ~env_pad, ~env_pad_n, env_hold_n, 4 + NST_FLAG, "/PAD"
-	+code doconst
-	+value 100
-				
-+header ~env_bits, ~env_bits_n, env_pad_n, 17 + NST_FLAG, "ADDRESS-UNIT-BITS"
-	+code doconst
-	+value 16
-				
-+header ~env_floored, ~env_floored_n, env_bits_n, 7 + NST_FLAG, "FLOORED"
-	+code doconst
-	+value VAL_TRUE
-				
-+header ~env_maxchar, ~env_maxchar_n, env_floored_n, 8 + NST_FLAG, "MAX-CHAR"
-	+code doconst
-	+value 255
-				
-+header ~env_maxd, ~env_maxd_n, env_maxchar_n, 5 + NST_FLAG, "MAX-D"
-	+forth
-	+token dlit
-	+value $FFFF
-	+value $7FFF
-	+token exit
-				
-+header ~env_maxn, ~env_maxn_n, env_maxd_n, 5 + NST_FLAG, "MAX-N"
-	+code doconst
-	+value $7FFF
-				
-+header ~env_maxu, ~env_maxu_n, env_maxn_n, 5 + NST_FLAG, "MAX-U"
-	+code doconst
-	+value $FFFF
-				
-+header ~env_maxud, ~env_maxud_n, env_maxu_n, 6 + NST_FLAG, "MAX-UD"
-	+forth
-	+token dlit
-	+value $FFFF
-	+value $FFFF
-	+token exit
-				
-+header ~env_rstack, ~env_rstack_n, env_maxud_n, 18 + NST_FLAG, "RETURN-STACK-CELLS"
-	+code doconst
-	+value RSIZE / 2
-				
-+header ~env_stack, ~env_stack_n, env_rstack_n, 11 + NST_FLAG, "STACK-CELLS"
-	+code doconst
-	+value (DSIZE - 4*SSAFE) / 2 + 1	; Note the extra cell for _dtop
-				
-+header ~environmentq, ~environmentq_n, env_stack_n, 12, "ENVIRONMENT?"
-	+forth
-	+token xfind, dup, qbranch
-	+address environmentq_1
-	+token count, lit
-	+value NAMEMASK
-	+token and_op, add, twoplus, execute, true
-environmentq_1:
-	+token exit
+	+value VAL_FALSE
 
 ; ==============================================================================
 ; Optional File-Access word set
@@ -3812,7 +3903,7 @@ _secondary = _wscratch
 ; Full equivalent to C64 OPEN, not exposed to dictionary yet
 ; Note that it requires 5 stack parameters as the string is enchoded as (c_addr,u)
 ; Top of data stack will have filenum or 0 on error
-+header_internal ~c64open:
++header_internal ~c64open
 	+code
 	+dpop
 	ldx _dtop
@@ -3842,7 +3933,7 @@ c64open_error:
 	jmp next
 
 ; Corresponding equivalent to CLOSE
-+header_internal ~c64close:
++header_internal ~c64close
 	+code
 	+dpop
 	jsr CLOSE
@@ -3889,10 +3980,10 @@ wo_v:
 	+token plusplace, lit
 	+value _openfiles
 	+token peek, freebit
-	+token dup, zerone, qbranch
-	+address of_2
-	+token lit
-	+value 8
+	+token dup, zerone, qbbranch
+	+baddress of_2
+	+token blit
+	+bvalue 8
 	+token over, lit
 	+value _fnamebuf
 	+token count, c64open, dup, lit
@@ -3919,10 +4010,10 @@ of_1:
 	+token place, lit
 	+value _fnamebuf
 	+token plusplace
-	+token one, lit
-	+value 8
-	+token lit
-	+value 15
+	+token one, blit
+	+bvalue 8
+	+token blit
+	+bvalue 15
 	+token lit
 	+value _fnamebuf
 	+token count, c64open
@@ -3949,10 +4040,10 @@ df_1:
 	+token lit
 	+value _fnamebuf
 	+token plusplace
-	+token one, lit
-	+value 8
-	+token lit
-	+value 15
+	+token one, blit
+	+bvalue 8
+	+token blit
+	+bvalue 15
 	+token lit
 	+value _fnamebuf
 	+token count, c64open
@@ -3985,8 +4076,8 @@ rf_2:
 ; A simplistic implementation to test for existence
 +header ~filestatus, ~filestatus_n, filesize_n, 11, "FILE-STATUS"
 	+forth
-	+token ro, openfile, qbranch
-	+address filestatus_1
+	+token ro, openfile, qbbranch
+	+baddress filestatus_1
 	+token true, exit
 filestatus_1:
 	+token closefile, zero, exit
@@ -4038,24 +4129,24 @@ xreadchar_2:
 	+forth
 	+token setread, swap, dup, rot, add, over					; c-addr, c-addr-limit, current
 readline_1:
-	+token twodup, swap, uless, qbranch
-	+address readline_4				; buffer full?
+	+token twodup, swap, uless, qbbranch
+	+baddress readline_4				; buffer full?
 readline_7:
-	+token iseof, zeroeq, qbranch
-	+address readline_2
+	+token iseof, zeroeq, qbbranch
+	+baddress readline_2
 	+token xreadchar, qdup, qbranch
 	+address readline_7 ; EOF workaround
-	+token dup, lit
-	+value NEW_LINE
-	+token notequal, qbranch
-	+address readline_3		; end of line
+	+token dup, blit
+	+bvalue NEW_LINE
+	+token notequal, qbbranch
+	+baddress readline_3		; end of line
 	+token over, cpoke, oneplus, branch
 	+address readline_1 
 readline_2:
-	+token swap, drop, swap, sub, dup, zeroeq, qbranch
-	+address readline_5
-	+token false, branch
-	+address readline_6
+	+token swap, drop, swap, sub, dup, zeroeq, qbbranch
+	+baddress readline_5
+	+token false, bbranch
+	+baddress readline_6
 readline_3:
 	+token drop
 readline_4:
@@ -4069,10 +4160,10 @@ readline_6:
 	+forth
 	+token setread, swap, dup, rot, add, over					; c-addr, c-addr-limit, current
 readfile_1:
-	+token twodup, swap, uless, qbranch
-	+address readfile_3				; buffer full?
-	+token iseof, zeroeq, qbranch
-	+address readfile_2
+	+token twodup, swap, uless, qbbranch
+	+baddress readfile_3				; buffer full?
+	+token iseof, zeroeq, qbbranch
+	+baddress readfile_2
 	+token xreadbyte		; end of file?
 	+token over, cpoke, oneplus, branch
 	+address readfile_1 
@@ -4091,8 +4182,8 @@ xputchar = emit
 
 +header ~writeline, ~writeline_n, readfile_n, 10, "WRITE-LINE"
 	+forth
-	+token dup, tor, writefile, rfrom, setwrite, lit
-	+value NEW_LINE
+	+token dup, tor, writefile, rfrom, setwrite, blit
+	+bvalue NEW_LINE
 	+token xputchar, zero, setwrite, exit
 
 ; This can be implemented using KERNAL SAVE, but the corresponding READ-LINE cannot be implemented
@@ -4101,8 +4192,8 @@ xputchar = emit
 	+forth
 	+token setwrite
 writefile_1:
-	+token dup, zerone, qbranch
-	+address writefile_2
+	+token dup, zerone, qbbranch
+	+baddress writefile_2
 	+token swap, dup, cpeek, xputchar, oneplus, swap, oneminus, branch
 	+address writefile_1
 writefile_2:
@@ -4117,10 +4208,10 @@ writefile_2:
 	+forth
 	+token lit
 	+value _ibufcount
-	+token peek, lit
-	+value 7
-	+token greater, qbranch
-	+address includefile_1
+	+token peek, blit
+	+bvalue 7
+	+token greater, qbbranch
+	+baddress includefile_1
 	+token xabortq
 	+string 17, "TOO MANY INCLUDES"
 includefile_1:
@@ -4134,13 +4225,13 @@ includefile_1:
 	+value _ibuf
 	+token lit
 	+value _ibufcount
-	+token peek, lit
-	+value 100
+	+token peek, blit
+	+bvalue 100
 	+token mult, add, over, poke
 	+token twominus, zero, over, poke
 	+token twominus, swap, over, poke
-	+token twominus, lit
-	+value 6
+	+token twominus, blit
+	+bvalue 6
 	+token over, poke
 	+token lit
 	+value _source
@@ -4148,8 +4239,8 @@ includefile_1:
 	+token lit
 	+value _ibufcount
 	+token dup, peek, oneplus, swap, poke
-	+token state, qbranch
-	+address includefile_2
+	+token state, qbbranch
+	+baddress includefile_2
 	+token interpret
 includefile_2:
 	+token exit
@@ -4158,15 +4249,14 @@ includefile_2:
 	+forth
 	+token parsename, included, exit
 
-; TODO - should produce an error on non-existing file. Currently OPEN-FILE does not report that properly
 +header ~included, ~included_n, include_n, 8, "INCLUDED"
 	+forth
-	+token twodup, filestatus, nip, qbranch
-	+address included_1
+	+token twodup, filestatus, nip, qbbranch
+	+baddress included_1
 	+token twodrop, exit
 included_1:
-	+token twodup, xcreate, ro, openfile, qbranch
-	+address included_2
+	+token twodup, xcreate, ro, openfile, qbbranch	; TODO word without body!
+	+baddress included_2
 	+token drop, exit
 included_2:
 	+token includefile, exit
@@ -4177,8 +4267,8 @@ included_2:
 
 +header ~required, ~required_n, require_n, 8, "REQUIRED"
 	+forth
-	+token twodup, xfind, zeroeq, qbranch
-	+address required_1
+	+token twodup, xfind, zeroeq, qbbranch
+	+baddress required_1
 	+token included, exit
 required_1:
 	+token twodrop, exit
@@ -4190,7 +4280,8 @@ required_1:
 	+forth
 	+token create, here, zero, zero, comma, xcode
 	!byte JSR_INSTR
-	+token does, peek, exit
+	+address does
+	+token peek, exit
 
 +header ~endstructure, ~endstructure_n, beginstructure_n, 13, "END-STRUCTURE"
 	+forth
@@ -4200,7 +4291,8 @@ required_1:
 	+forth
 	+token create, over, comma, add, xcode
 	!byte JSR_INSTR
-	+token does, peek, add, exit
+	+address does
+	+token peek, add, exit
 			
 +header ~field, ~field_n, addfield_n, 6, "FIELD:"
 	+forth
@@ -4222,8 +4314,8 @@ forth_system_c:
 	+token decimal, false, state, poke, xsst
 	+token lit
 	+value autorun
-	+token count, included, branch
-	+address forth_system_1
+	+token count, included, bbranch
+	+baddress forth_system_1
 forth_system_r:
 	+token decimal, false, state, poke, xsst
 forth_system_1:
