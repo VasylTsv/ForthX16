@@ -77,7 +77,7 @@ SCNKEY = $FF9F
 ; RAM bus is 16 bit, which is good, but the registers are all 8-bit, and that makes
 ; things difficult. The standard stack is only 256 bytes, not great for Forth (but
 ; many implementations use that for data stack anyway). For this implementation, we will
-; get two 1K stacks - return stack at the top of the RAM and data stack at $0400-$07FF.
+; get two 1K stacks.
 ; However, to make implementation more efficient, the very top element of the data stack
 ; is separated on the zero page. The safe areas against overflow/underflow are 4 cells vs
 ; 8 cells in Forth Model T. Return stack does not use safe areas, as it is rarely an issue
@@ -188,6 +188,7 @@ NEW_LINE = $0D
 
 +hmbuffer ~TOKENS, 2*TOKEN_COUNT	; token lookup table (XT->CFA)
 +hmbuffer ~RSTACK, RSIZE		; return stack
++hmbuffer ~DSTACK, DSIZE		; data stack
 
 +hmbuffer ~_ibuf, 7*100			; seven 100-char buffers for INCLUDE-FILE
 +hmbuffer ~_sbuf, 2*100			; two 100-char buffers for S" / S\"
@@ -203,9 +204,6 @@ _hldend = _hld + 100
 _sourcestack = _sourcestack_bottom + 120
 
 +high_memory_end ~MEMTOP
-
-; Data stack is at the special location on Commander X16 (not compatible with C64!)
-DSTACK = $0400
 
 RSTACK_INIT = RSTACK + RSIZE - 2
 DSTACK_INIT = DSTACK + DSIZE - 2*SSAFE - 2
@@ -465,13 +463,7 @@ STACKLIMIT = DSIZE - 4*SSAFE
 }
 
 ; ==============================================================================
-
-; To make the system more robust we need some way to recover from stack
-; underruns and overruns. It cannot be 100% foolproof (the system with
-; unrestricted POKE cannot be foolproof) but a single DROP should not
-; take out the entire system.
-; So, the approach is the following: reserve first four and last four words
-; of the stack and call ABORT if checks detect the stack there.
+; Initialize the system
 
 	lda #<forth_system_c
 	ldx #>forth_system_c
@@ -495,6 +487,8 @@ STACKLIMIT = DSIZE - 4*SSAFE
 	lda #<forth_system_n
 	ldx #>forth_system_n
 	+stax _latest
+	
+; This needs to be changed for split memory model, and it is the only change
 	lda #<end_of_image
 	ldx #>end_of_image
 	+stax _here
@@ -514,29 +508,27 @@ STACKLIMIT = DSIZE - 4*SSAFE
 	pha
 
 ; ==============================================================================
-; TODO - rewrite
-; Structure of a vocabulary word in direct threaded code:
+; Structure of a vocabulary word in token threaded code:
 ; offset     length      meaning
 ;    0          1        n - length of the name and flags (NFA)
 ;    1          n        name
-;    n+1        2        link to the previous word (LFA)
-;    n+3        3        jump to code (typically CALL) (CFA)
-;    n+6        x        parameter list (for CALL these often are pointers
-;                          to code fields of other words (PFA)
-; Note that the CPU architecture does not require alignment. If it was, the LFA
-; could be aligned
-; Most elements of a word definition are hidden behind macros. Note the particular
-; distinction between token, value, and address. Token size may change with the
-; interpreter threading model; the address may potentially become short relative in
-; some cases. Note that each work definition starts either with +forth or +code
-; Example:
-; Forth   : Example 2 dup + . ;
-; Assembly:
-; +header ~example, ~example_n, link_last, link_last_n, 6, "Example"
-;            +forth
-;            +token lit
-;            +value 2
-;            +token dup, plus, dot, exit
+;    n+1     1 or 2      link to the previous word (LFA)
+;  [n+2(3)]     1        prologue, RTS in current model (CFA)
+;    ...        x        tokens (PFA)
+; This may be quite confusing. LFA is actually a variable length value - it is an
+; _offset_ to the previous word (counting between NFAs). If is less than 128, it will
+; take one byte. Otherwise it is MSB first with high bit set in MSB - so if the first
+; byte has the high bit set, there will be two bytes. One exception - if the first
+; byte is $ff, it is the only byte and it links to the last word in core (split memory
+; support).
+; Native word does not have a prologue, can start immediately after the LFA and should
+; be ended with "jmp next". Forth words start with prologue consisting of the instruction
+; RTS, that would cause an immediate jump to CALL.
+; Most elements of a word definition are hidden behind macros. This is both for readability
+; and to make it easier to modify in the future.
+; All core words only refer to tokens below 256, so all token references take one byte.
+; Note that the tokens are encoded with MSB first, but that MSB is always very small, and
+; the implementation treats two-byte tokens as essentially two tokens (see trick in NEXT).
 
 ; ==============================================================================
 ; Inner interpreter
@@ -2813,6 +2805,10 @@ find_exit:
 +header ~xdigit, ~xdigit_n	; (DIGIT)
 	+code
 	lda _dtop
+	cmp #$40
+	bcc +
+	and #$5f
++:
 	+sub '0'
 	cmp #10
 	bmi xdigit_1
@@ -3574,6 +3570,10 @@ smove_7:
 	rts
 
 smove_hexdigit:
+	cmp #$40
+	bcc +
+	and #$5f
++:
 	+sub '0'
 	cmp #10
 	bmi smove_h1
@@ -3916,7 +3916,7 @@ includefile_2:
 	+qbranch_fwd included_1
 	+token twodrop, exit
 included_1:
-	+token twodup, here, tor, xcreate	; create a dummy word with the same name as the included file
+	+token twodup, here, tor, xcreate	; cr eate a dummy word with the same name as the included file
 	+literal RTS_INSTR
 	+token ccomma, compile, exit, rfrom, context, poke
 	+token ro, openfile
