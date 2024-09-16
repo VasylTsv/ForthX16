@@ -45,6 +45,10 @@
 start_of_image:
     !byte $0b,$08,$01,$00,$9e,$32,$30,$36,$31,$00,$00,$00
 
+!ifdef CART {
+	!error not ready
+}
+
 ; KERNAL entries
 SETLFS = $FFBA
 SETNAM = $FFBD
@@ -58,8 +62,6 @@ CHROUT = $FFD2
 GETIN = $FFE4
 READST = $FFB7
 STOP = $FFE1
-UDTIM = $FFEA
-SCNKEY = $FF9F
 
 !convtab raw
 
@@ -154,8 +156,9 @@ NEW_LINE = $0D
 +zpword ~_state
 +zpbyte ~_sflip				; flip-flop for S" buffer selection
 +zpword ~_ibufcount			;number of used buffers
-+zpword ~_source				; pointer to the current source
++zpword ~_source			; pointer to the current source
 +zpword ~_openfiles			; bitfield for files currently open to translate from C64 to Forth opening semantics
++zpword ~_eoffiles			; bitfield for files finished reading (set to 0 on open and to 1 when read to EOF)
 
 +zpbyte ~_stopcheck
 
@@ -311,8 +314,12 @@ STACKLIMIT = DSIZE - 4*SSAFE
 			!byte ((.label_n-__prev_n) >> 8) | $80, (.label_n-__prev_n) & $FF
 		}
 	}
-.token = __prev_token + 1
-	!set __prev_token = .token
+	!if __hide_tokens = 0 {
+		.token = __prev_token + 1
+		!set __prev_token = .token
+	} else {
+		!set __prev_token = __prev_token + 1
+	}
 	!set __prev_n = .label_n
 }
 
@@ -331,6 +338,7 @@ STACKLIMIT = DSIZE - 4*SSAFE
 .token = 15	; tokens 0-15 have special meaning extending tokens past 8 bit
 	!set __prev_token = .token
 	!set __prev_n = .label_n
+	!set __hide_tokens = 0
 }
 
 !macro check_token_range {
@@ -339,6 +347,11 @@ STACKLIMIT = DSIZE - 4*SSAFE
 	} else if __prev_token >= $fa {
 		!warn "Running low on short tokens!"
 	}
+	!set __hide_tokens = 1
+}
+
+!macro ignore_token_range {
+	!set __hide_tokens = 0
 }
 
 ; Beginning of a compiled Forth word. Tokens follow
@@ -507,6 +520,12 @@ STACKLIMIT = DSIZE - 4*SSAFE
 	lda #<call-1
 	pha
 
+; Move the stack top down by one (which technically will move it below bottom, but
+; this is fine here), it will be corrected back by the data push below. This allows
+; to save quite a bit of memory on words that end with dpush/exit
+	inc _dstack
+	inc _dstack
+
 ; ==============================================================================
 ; Structure of a vocabulary word in token threaded code:
 ; offset     length      meaning
@@ -540,6 +559,10 @@ STACKLIMIT = DSIZE - 4*SSAFE
 ;	RI += 1		; token size(!)
 ;	goto mem(W)	; ->token
 
+; Special case for words that end with push to data stack
+
+dpush_and_next:
+	+dpush
 next:
 	ldx #>TOKENS		; note that LSB is assumed to be 0
 next_ext:
@@ -635,8 +658,7 @@ invokeax:
 created:
 	+ldax _w
 	+incax 3
-	+dpush
-	jmp next
+	jmp dpush_and_next
 
 ; DOES - semantics applied to the defined word by DOES>. It is an extension of CREATE semantics that redirects
 ; the execution to the creating word
@@ -708,8 +730,7 @@ doconst:
 	tax
 	dey
 	lda (_w),y
-	+dpush
-	jmp next
+	jmp dpush_and_next
 
 ; Call to this subroutine (JSR contforth) allows to switch execution from native to Forth. One particular use case
 ; is error handling as it is easier to setup ABORT" from Forth
@@ -926,6 +947,23 @@ gtt_done:
 
 	rts
 
+; Close file handles 3-14, this is used in ABORT to reset the error state
+close_open_files:
+	lda #3
+	sta _scratch
+-:
+	lda _scratch
+	cmp #15
+	beq +
+	jsr CLOSE
+	inc _scratch
+	bne -
++:
+	lda #7		; protect channels 0-2 and 15
+	ldx #128
+	+stax _openfiles
+	rts
+
 ; ==============================================================================
 ; Forth vocabulary starts here. This special header form reserves 16 tokens for
 ; extended token range. This essentially gives 4K-16 possible tokens maximum,
@@ -995,7 +1033,7 @@ lfatonfa_next:
 	+literal 31
 	+token greater
 	+qbranch lfatonfa_next
-	+token drop, drop, zero, exit
+	+token twodrop, zero, exit
 lfatonfa_found:
 	+token drop, exit
 
@@ -1095,7 +1133,13 @@ cfatoxt_found:		; Unless the system is broken, something has to be found and C i
 	+code
 abort_c:
 	+init_dstack
+	jsr close_open_files
 	jmp quit_c
+
+; Somehow this ended being a common byte sequence (8 instances), so we can save a few bytes here
++header ~twominus_zero_over_poke, ~twominus_zero_over_poke_n
+	+forth
+	+token twominus, zero, over, poke, exit
 
 ;
 ; : (sst) _sourcestack
@@ -1106,12 +1150,12 @@ abort_c:
 +header ~xsst, ~xsst_n			; Reset source stack
 	+forth
 	+literal _sourcestack
-	+token twominus, zero, over, poke			; #TIB
+	+token twominus_zero_over_poke			; #TIB
 	+token twominus
 	+literal _tib
-	+token over, poke							; TIB
-	+token twominus, zero, over, poke			; >IN
-	+token twominus, zero, over, poke			; SOURCE-ID
+	+token over, poke						; TIB
+	+token twominus_zero_over_poke			; >IN
+	+token twominus_zero_over_poke			; SOURCE-ID
 	+token twominus
 	+literal $04
 	+token over, poke		; standard input has 4 parameters: 0, >IN, TIB, #TIB
@@ -1425,8 +1469,7 @@ ummod_x:
 	+ldax _shigh
 	+stax _dtop
 	+ldax _slow
-	+dpush
-	jmp next
+	jmp dpush_and_next
 
 ;
 ; : ud/mod >r 0 r@ um/mod rot rot r> um/mod rot ;
@@ -1485,8 +1528,7 @@ ummult_x:
 	+ldax _slow
 	+stax _dtop
 	+ldax _shigh
-	+dpush
-	jmp next
+	jmp dpush_and_next
 
 ; UD* is not part of the standard but it is very convenient to use in formatting words
 ;
@@ -1534,8 +1576,7 @@ mmult_1:
 	sta _dtop
 	txa
 	and _dtop+1
-	sta _dtop+1
-	jmp next
+	jmp +			; Cross-word jump to save two bytes
 
 +header ~or, ~or_n, "OR"
 	+code
@@ -1544,8 +1585,7 @@ mmult_1:
 	sta _dtop
 	txa
 	ora _dtop+1
-	sta _dtop+1
-	jmp next
+	jmp +			; Cross-word jump to save two bytes
 
 +header ~xor, ~xor_n, "XOR"
 	+code
@@ -1554,6 +1594,7 @@ mmult_1:
 	sta _dtop
 	txa
 	eor _dtop+1
++:
 	sta _dtop+1
 	jmp next
 
@@ -1596,6 +1637,11 @@ freebit_2:
 	+token dup, peek, rot, one, swap, lshift
 	+token invert, and_op, swap, poke, exit
 
++header ~getbit, ~getbit_n
+	+forth
+	+token peek, one, rot
+	+token lshift, and_op, exit
+
 ; ==============================================================================
 ; Comparisons
 
@@ -1609,20 +1655,17 @@ freebit_2:
 	ldx #255
 	lda _dtop
 	ora _dtop+1
-	beq zeroeq_1
+	beq +
 	ldx #0
-zeroeq_1:
-	stx _dtop
-	stx _dtop+1
-	jmp next
+	beq +		; Note: cross-word jump, guaranteed to occur here
 
 +header ~zerolt, ~zerolt_n, "0<"
 	+code
 	ldx #255
 	lda _dtop+1
-	bmi zerolt_1
+	bmi +
 	ldx #0
-zerolt_1:
++:
 	stx _dtop
 	stx _dtop+1
 	jmp next
@@ -1755,8 +1798,7 @@ uless_1:
 +header ~dup, ~dup_n, "DUP"
 	+code
 	+ldax _dtop
-	+dpush
-	jmp next
+	jmp dpush_and_next
 
 +header ~drop, ~drop_n, "DROP"
 	+code
@@ -1770,8 +1812,7 @@ uless_1:
 	tax
 	dey
 	lda (_dstack),y
-	+dpush
-	jmp next
+	jmp dpush_and_next
 
 +header ~swap, ~swap_n, "SWAP"
 	+code
@@ -1785,8 +1826,7 @@ uless_1:
 	tya
 	tax
 	pla
-	+dpush
-	jmp next
+	jmp dpush_and_next
 
 ;
 ;	: nip swap drop ;
@@ -1856,8 +1896,7 @@ roll_1:
 	tax
 	tya
 	ror
-	+dpush
-	jmp next
+	jmp dpush_and_next
 
 ;
 ;	: 2drop drop drop ;
@@ -1922,7 +1961,7 @@ xqdo_1:
 	+token rfrom, oneplus			; new value of current
 	+token rat, over, equal
 	+qbranch_fwd xloop_1
-	+token drop, drop, rdrop, exit	; exit the loop (leaveaddr on the rstack)
+	+token twodrop, rdrop, exit	; exit the loop (leaveaddr on the rstack)
 xloop_1:
 	+token tor, peek, tor, exit		; continue the loop
 
@@ -1935,7 +1974,7 @@ xloop_1:
 	+token two, pick, rat, sub		; diff limit and previous current / addr, newcur, s^d, olddiff, newdiff
 	+token xor, zerolt, and_op
 	+qbranch_fwd xploop_1  ; or diffs before and after have different signs / newdiff^olddiff < 0
-	+token drop, drop, rdrop, exit	; exit the loop (leaveaddr on the rstack)
+	+token twodrop, rdrop, exit	; exit the loop (leaveaddr on the rstack)
 xploop_1:
 	+token tor, peek, tor, exit		; continue the loop
 
@@ -2000,8 +2039,7 @@ xploop_1:
 +header ~rfrom, ~rfrom_n, "R>"
 	+code
 	+rpop
-	+dpush
-	jmp next
+	jmp dpush_and_next
 
 +header ~tor, ~tor_n, ">R"
 	+code
@@ -2016,8 +2054,7 @@ xploop_1:
 	tax
 	dey
 	lda (_rstack),y
-	+dpush
-	jmp next
+	jmp dpush_and_next
 
 +header ~rdrop, ~rdrop_n, "RDROP"
 	+code
@@ -2041,8 +2078,7 @@ xploop_1:
 	+rpop
 	+dpush
 	+ldax _rscratch
-	+dpush
-	jmp next
+	jmp dpush_and_next
 
 +header ~tworat, ~tworat_n, "2R@"
 	+code
@@ -2057,8 +2093,7 @@ xploop_1:
 	tax
 	dey
 	lda (_rstack),y
-	+dpush
-	jmp next
+	jmp dpush_and_next
 
 ; ==============================================================================
 ; Basic memory operations
@@ -3506,8 +3541,7 @@ smove_3:
 smove_4:
 
 	+ldax _sresult
-	+dpush
-	jmp next
+	jmp dpush_and_next
 
 smove_char:
 	+inc16 _sactual		; increasing the actual count before any checks so it will include the quote
@@ -3595,7 +3629,7 @@ fill_1:
 	+token oneminus, tor, twodup, cpoke, oneplus
 	+branch fill_1
 fill_2:
-	+token drop, drop, exit
+	+token twodrop, exit
 
 
 ; The next two are non-standard but proposed for inclusion
@@ -3637,9 +3671,20 @@ whigh = _rscratch
 	adc whigh+1
 	tax
 	tya
-	+dpush
-	jmp next
+	jmp dpush_and_next
 
+; : d< rot > if 2drop true else < then ;
++header ~dless, ~dless_n, "D<"
+	+forth
+	+token rot, twodup, equal
+	+qbranch_fwd dless_1
+	+token twodrop, uless, exit
+dless_1:
+	+token greater
+	+qbranch_fwd dless_2
+	+token twodrop, true, exit
+dless_2:
+	+token twodrop, false, exit
 
 +header ~dlit, ~dlit_n
 	+forth
@@ -3678,39 +3723,33 @@ whigh = _rscratch
 ; Forth standard makes assumptions about I/O capabilities that are simply not true
 ; for most 8-bit systems. Implementing as much as possible to get the system going
 
-_devnum = _rscratch
-_secondary = _wscratch
-
 ; Full equivalent to C64 OPEN, not exposed to dictionary yet
 ; Note that it requires 5 stack parameters as the string is enchoded as (c_addr,u)
 ; Top of data stack will have filenum or 0 on error
 +header ~c64open, ~c64open_n
 	+code
 	+dpop
+	; Note that A is set exactly to what we need there
 	ldx _dtop
 	ldy _dtop+1
 	jsr SETNAM
 	+dpop
 	lda _dtop
-	sta _secondary
+	pha
 	+dpop
 	lda _dtop
-	sta _devnum
+	pha
 	+dpop
+	pla
+	tax
+	pla
+	tay
 	lda _dtop
-	ldx _devnum
-	ldy _secondary
+	pha
 	jsr SETLFS
 	jsr OPEN
-	bcs c64open_error	; TODO: not seeing this firing
-	jsr READST
-	bne c64open_error
-	jmp next
-c64open_error:
-	lda _dtop
-	jsr CLOSE
-	lda #0
-	sta _dtop
+	pla
+	ldx #0
 	jmp next
 
 ; Corresponding equivalent to CLOSE
@@ -3719,6 +3758,34 @@ c64open_error:
 	+dpop
 	jsr CLOSE
 	jmp next
+
+; This is used to check the drive status which is a rather
+; complex process on C64. Ignoring responses starting with 0 (no responses start with 1)
++header ~c64iostatus, ~c64iostatus_n
+	+code
+	ldx #15
+	jsr CHKIN
+	jsr CHRIN
+	pha
+-:
+	jsr CHRIN
+	cmp #NEW_LINE
+	bne -
+	jsr CLRCHN
+	pla
+	cmp #'2'
+	bcs +
+	lda #0
++:
+	tax
+	jmp dpush_and_next
+
+; This will actually report other I/O errors, but this should be fine
++header ~c64iseof, ~c64iseof_n
+	+code
+	jsr READST
+	tax
+	jmp dpush_and_next
 
 +header ~ro, ~ro_n, "R/O"
 	+code doconst
@@ -3745,9 +3812,17 @@ ro_v:
 	+literal 8
 	+token over
 	+literal _fnamebuf
-	+token count, c64open, dup
+	+token count, c64open
+	+token c64iostatus, zeroeq
+	+qbranch_fwd of_3
+	+token dup, dup
 	+literal _openfiles
-	+token setbit, dup, zeroeq
+	+token setbit
+	+literal _eoffiles
+	+token clearbit
+	+token zero, exit
+of_3:
+	+token drop, zero, one
 of_2:
 	+token exit
 of_1:
@@ -3778,11 +3853,25 @@ of_1:
 filestatus_1:
 	+token closefile, zero, exit
 
+; Set/unset channel for read and write, these need to follow after each other to
+; save on common code
 +header ~setread, ~setread_n
 	+code
 	+dpop
 	tax
+	beq +
 	jsr CHKIN
+	jmp next
+
++header ~setwrite, ~setwrite_n
+	+code
+	+dpop
+	tax
+	beq +
+	jsr CHKOUT
+	jmp next
++:
+	jsr CLRCHN
 	jmp next
 
 +header ~xreadchar, ~xreadchar_n
@@ -3790,89 +3879,84 @@ filestatus_1:
 	jsr CHRIN
 	ldx #0
 	and #$7F		; Ignore high bit (so Shift-Space is not a problem)
-	cmp #10			; Do two substitutions: \n -> \r and \t -> ' '
-	bne xreadchar_1
+	cmp #10			; Do two substitutions: \n -> \r and \t -> ' ' (actually, everything until \t)
+	bne +
 	lda #NEW_LINE
-xreadchar_1:
-	cmp #9
-	bne xreadchar_2
++:
+	bcs +
 	lda #32
-xreadchar_2:
-	+dpush
-	jmp next
++:
+	jmp dpush_and_next
+
++header ~xreadcharchecked, ~xreadcharchecked_n
+	+forth
+	+token xreadchar, dup
+	+literal NEW_LINE
+	+token equal, exit
 
 +header ~xreadbyte, ~xreadbyte_n
 	+code
 	jsr CHRIN
 	ldx #0
 	+dpush
-	jmp next
-
-+header ~iseof, ~iseof_n
-	+code
-	jsr READST
-	and #64
+	lda #0
 	tax
-	+dpush
-	jmp next
+	jmp dpush_and_next
 
-; There is something odd in EOF logic on X16 (maybe on C64 as well). The EOF state is not kept with
-; the handle properly, so it will be false after CHRIN triggering false reads on the line after
-; the EOF (the line with EOF cannot really return that state per Forth standard).
-; As a workaround, skipping zero chars in READ-LINE, these should not occur in text files anyway.
+; This is the common code of READ-LINE and READ-FILE. There are only two differences between them -
+; that READ-LINE stops on NL and there is one extra return value. Making internal reader vectorized
+; takes care of the first issue, the second one is trivial.
+
+_bytereader = _scratch_1
+
++header ~readgen, ~readgen_n
+	+forth
+	+literal _bytereader
+	+token cpoke
+	+token dup
+	+literal _eoffiles
+	+token getbit
+	+qbranch_fwd readgen_good
+	+token twodrop, drop, zero, false, zero, exit	; remove three parameters and put three 0s
+readgen_good:
+	+token dup, tor, setread, swap, dup, rot, add, over	; c-addr, c-addr-limit, current; fileid is accessible on the rstack
+readgen_loop:
+	+token twodup, swap, uless			; compare current < c-addr-limit
+	+qbranch_fwd readgen_done			; finished?
+	+literal _bytereader
+	+token cpeek, execute
+	+token tor, over, cpoke, oneplus, rfrom	; append to buffer
+	+token c64iseof, twodup, or	; top of the stack: NL, EOF, true if either is set
+	+qbranch_fwd readgen_continue
+	+qbranch_fwd readgen_noteof
+	+token rat
+	+literal _eoffiles
+	+token setbit						; just set the flag, it will block the following attempts
+readgen_noteof:
+	+qbranch_fwd readgen_done
+	+token oneminus						; NL is not supposed to be included in the count
+readgen_done:
+	+token nip, swap, sub				; drop c-addr-limit; current - c-addr
+	+token zero, setread
+	+token rdrop, true, c64iostatus, exit
+readgen_continue:
+	+token twodrop
+	+branch readgen_loop					; remove both NL and EOF flags and proceed to the next char
 
 +header ~readline, ~readline_n, "READ-LINE"
 	+forth
-	+token setread, swap, dup, rot, add, over					; c-addr, c-addr-limit, current
-readline_1:
-	+token twodup, swap, uless
-	+qbranch_fwd readline_4				; buffer full?
-readline_7:
-	+token iseof, zeroeq
-	+qbranch_fwd readline_2
-	+token xreadchar, qdup
-	+qbranch readline_7 ; EOF workaround
-	+token dup
-	+literal NEW_LINE
-	+token notequal
-	+qbranch_fwd readline_3		; end of line
-	+token over, cpoke, oneplus
-	+branch readline_1 
-readline_2:
-	+token nip, swap, sub, dup, zeroeq
-	+qbranch_fwd readline_5
-	+token false
-	+branch_fwd readline_6
-readline_3:
-	+token drop
-readline_4:
-	+token nip, swap, sub
-readline_5:
-	+token true
-readline_6:
-	+token zero, setread, zero, exit
-
-+header ~setwrite, ~setwrite_n
-	+code
-	+dpop
-	tax
-	jsr CHKOUT
-	jmp next
+	+literal xreadcharchecked
+	+token readgen, exit
 
 xputchar = emit
 
-; This can be implemented using KERNAL SAVE, but the corresponding READ-LINE cannot be implemented
-; with KERNAL LOAD. Leaving it as is for now.
 +header ~writefile, ~writefile_n, "WRITE-FILE"
 	+forth
-	+token setwrite
-writefile_1:
-	+token qdup
-	+qbranch_fwd writefile_2
-	+token swap, dup, cpeek, xputchar, oneplus, swap, oneminus
-	+branch writefile_1
-writefile_2:
-	+token drop, zero, setwrite, zero, exit
+	+token setwrite, type, zero, setwrite, c64iostatus, exit
+
++header ~writeline, ~writeline_n, "WRITE-LINE"
+	+forth
+	+token setwrite, type, cr, zero, setwrite, c64iostatus, exit
 
 +error_message ~includefile_error
 +header ~includefile, ~includefile_n, "INCLUDE-FILE"
@@ -3886,16 +3970,16 @@ writefile_2:
 includefile_1:
 	+literal _source
 	+token peek
-	+token twominus, zero, over, poke	; two more entries to keep fileposition before the last refill
-	+token twominus, zero, over, poke
-	+token twominus, zero, over, poke
+	+token twominus_zero_over_poke	; two more entries to keep fileposition before the last refill
+	+token twominus_zero_over_poke
+	+token twominus_zero_over_poke
 	+token twominus
 	+literal _ibuf
 	+literal _ibufcount
 	+token peek
 	+literal 100
 	+token mult, add, over, poke
-	+token twominus, zero, over, poke
+	+token twominus_zero_over_poke
 	+token twominus, tuck, poke
 	+token twominus
 	+literal 6
@@ -3916,7 +4000,7 @@ includefile_2:
 	+qbranch_fwd included_1
 	+token twodrop, exit
 included_1:
-	+token twodup, here, tor, xcreate	; cr eate a dummy word with the same name as the included file
+	+token twodup, here, tor, xcreate	; create a dummy word with the same name as the included file
 	+literal RTS_INSTR
 	+token ccomma, compile, exit, rfrom, context, poke
 	+token ro, openfile
@@ -3937,11 +4021,11 @@ required_1:
 ; Here lies an important boundary - all words above it are used in other core
 ; words, everythign below is unreferenced. The order is important, so smaller
 ; token values will fit in one byte making core smaller.
-; The boundary is not very precise, there is some slack. Placing words too
-; low may cause compile errors, placing too high is benign.
+; The macro below will enforce references, any reference to words below will
+; not compile even if otherwise legal. It will also check that the number of
+; words above does not exceed single byte index.
 ; ============================================================================
 +check_token_range
-
 
 +header ~bin, ~bin_n, "BIN"
 	+forth
@@ -3963,7 +4047,7 @@ wo_v:
 	+forth
 	+token openfile, exit
 
-; C64 equivalent: OPEN 1,8,15,"S0:Name":CLOSE 1
+; C64 equivalent: PRINT#15,"S0:Name"
 +header ~deletefile, ~deletefile_n, "DELETE-FILE"
 	+forth
 	+literal df_1
@@ -3972,16 +4056,14 @@ wo_v:
 	+token place
 	+literal _fnamebuf
 	+token plusplace
-	+token one
-	+literal 8
-	+literal 15
 	+literal _fnamebuf
-	+token count, c64open
-	+token one, notequal, one, c64close, exit
+	+token count
+	+literal 15
+	+token writeline, exit
 df_1:
 	+string "S0:"
 
-; C64 equivalent: OPEN 1,8,15,"R0:NewName=OldName":CLOSE 1
+; C64 equivalent: PRINT#15,"R0:NewName=OldName"
 ; Note that this is the only word that uses PAD
 +header ~renamefile, ~renamefile_n, "RENAME-FILE"
 	+forth
@@ -3997,12 +4079,10 @@ df_1:
 	+token plusplace
 	+literal _fnamebuf
 	+token plusplace
-	+token one
-	+literal 8
-	+literal 15
 	+literal _fnamebuf
-	+token count, c64open
-	+token one, notequal, one, c64close, exit
+	+token count
+	+literal 15
+	+token writefile, exit
 rf_1:
 	+string "R0:"
 rf_2:
@@ -4020,24 +4100,8 @@ rf_2:
 
 +header ~readfile, ~readfile_n, "READ-FILE"
 	+forth
-	+token setread, swap, dup, rot, add, over					; c-addr, c-addr-limit, current
-readfile_1:
-	+token twodup, swap, uless
-	+qbranch_fwd readfile_3				; buffer full?
-	+token iseof, zeroeq
-	+qbranch_fwd readfile_2
-	+token xreadbyte		; end of file?
-	+token over, cpoke, oneplus
-	+branch readfile_1 
-readfile_2:
-readfile_3:
-	+token nip, swap, sub, zero, zero, setread, exit
-
-+header ~writeline, ~writeline_n, "WRITE-LINE"
-	+forth
-	+token dup, tor, writefile, rfrom, setwrite
-	+literal NEW_LINE
-	+token xputchar, zero, setwrite, exit
+	+literal xreadbyte
+	+token readgen, nip, exit
 
 ; Not needed on C64
 +header ~flushfile, ~flushfile_n, "FLUSH-FILE"
@@ -4177,7 +4241,6 @@ duless_2:
 ;
 ; : d0= or 0= ;
 ; : d0< nip 0< ;
-; : d< rot > if 2drop true else < then ;
 ;
 +header ~dzeroeq, ~dzeroeq_n, "D0="
 	+forth
@@ -4186,18 +4249,6 @@ duless_2:
 +header ~dzeroless, ~dzeroless_n, "D0<"
 	+forth
 	+token nip, zerolt, exit
-
-+header ~dless, ~dless_n, "D<"
-	+forth
-	+token rot, twodup, equal
-	+qbranch_fwd dless_1
-	+token twodrop, uless, exit
-dless_1:
-	+token greater
-	+qbranch_fwd dless_2
-	+token twodrop, true, exit
-dless_2:
-	+token twodrop, false, exit
 
 ;
 ; : d>s drop ;
@@ -4699,7 +4750,7 @@ restoreinput_3:
 	+token peek
 	+token twominus, tuck, poke
 	+token twominus, tuck, poke
-	+token twominus, zero, over, poke
+	+token twominus_zero_over_poke
 	+token twominus, minusone, over, poke
 	+token twominus
 	+literal 4
@@ -4913,10 +4964,9 @@ words_done:
 
 +header ~key, ~key_n, "KEY"
 	+code
-	jsr CHRIN			; TODO - this will echo the character, which contradicts the standard
+	jsr GETIN
 	ldx #0
-	+dpush
-	jmp next
+	jmp dpush_and_next
 
 ; ==============================================================================
 ; This word became standard in ANS Forth, part of optional Programming-Tools word set. Quit the interpreter.
@@ -4998,6 +5048,10 @@ order_done:
 ; ==============================================================================
 ; The main system loop. This has to be the last word in the core
 
+; Allow the next word to be referenced. It's not very likely that anybody will
+; call it by mistake anyway.
++ignore_token_range
+
 +header ~forth_system, ~forth_system_n
 	+forth
 forth_system_c:
@@ -5025,6 +5079,10 @@ forth_system_c:
 	+literal forth_wordlist_n
 	+literal _vocsref
 	+token poke
+; Open command channel for I/O status monitoring
+	+literal 15
+	+literal 8
+	+token over, zero, zero, c64open, drop
 ;
 	+literal autorun
 	+token count, included
@@ -5035,7 +5093,7 @@ forth_system_1:
 	+token interpret
 	+branch forth_system_1
 banner_text:
-	+string "FORTH TX16 1.1"
+	+string "FORTH TX16 1.2"
 autorun:
 	+string "AUTORUN.FTH"
 
