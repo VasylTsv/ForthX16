@@ -38,17 +38,6 @@
 ;	C64 PETSCII charset does not have backslash. Pound symbol is used instead
 ;	It does not have tilde either. Not used in standard words, but it is used in test suite
 
-; C64/Commander X16 prolog. "1 SYS 2061"
-; Make sure the file is built in CBM mode (extra $01,$08 at the beginning)
-
-* = $0801
-start_of_image:
-    !byte $0b,$08,$01,$00,$9e,$32,$30,$36,$31,$00,$00,$00
-
-!ifdef CART {
-	!error not ready
-}
-
 ; KERNAL entries
 SETLFS = $FFBA
 SETNAM = $FFBD
@@ -62,6 +51,35 @@ CHROUT = $FFD2
 GETIN = $FFE4
 READST = $FFB7
 STOP = $FFE1
+; Only used in cartridge build
+IOINIT = $ff84
+RAMTAS = $ff87
+RESTOR = $ff8a
+SCINIT = $ff81
+
+!ifdef CART {
+* = $8000
+start_of_image:
+	!word coldstart
+	!word warmstart
+	!byte $c3,$c2,$cd,$38,$30;	"CBM80"
+
+coldstart:
+	sei
+	jsr IOINIT
+	jsr RAMTAS
+	jsr RESTOR
+	jsr SCINIT
+	cli
+warmstart:
+} else {
+; C64/Commander X16 prolog. "1 SYS 2061"
+; Make sure the file is built in CBM mode (extra $01,$08 at the beginning)
+
+* = $0801
+start_of_image:
+    !byte $0b,$08,$01,$00,$9e,$32,$30,$36,$31,$00,$00,$00
+}
 
 !convtab raw
 
@@ -187,7 +205,11 @@ NEW_LINE = $0D
 	!set __hm_addr = .name
 }
 
-+high_memory_begin $9f00
+!ifdef CART {
++high_memory_begin $8000
+} else {
++high_memory_begin $a000
+}
 
 +hmbuffer ~TOKENS, 2*TOKEN_COUNT	; token lookup table (XT->CFA)
 +hmbuffer ~RSTACK, RSIZE		; return stack
@@ -501,9 +523,13 @@ STACKLIMIT = DSIZE - 4*SSAFE
 	ldx #>forth_system_n
 	+stax _latest
 	
-; This needs to be changed for split memory model, and it is the only change
+!ifdef CART {
+	lda #<$0801
+	ldx #>$0801
+} else {
 	lda #<end_of_image
 	ldx #>end_of_image
+}
 	+stax _here
 
 ; In token threaded code we need to generate the mapping of tokens to addresses
@@ -1055,8 +1081,6 @@ lfatonfa_found:
 
 ; ==============================================================================
 ; A very important word to translate CFA to XT
-; TODO: this is perf critical for interpretation. Optimize to use binary search
-; (token table has two sorted sections)
 
 +header ~cfatoxt, ~cfatoxt_n
 	+code
@@ -3010,7 +3034,7 @@ qstack_abort:
 	+qbranch qstack_abort
 	+token exit
 
-+header ~interpret, ~interpret_n, "INTERPRET"
++header ~interpret, ~interpret_n
 	+forth
 interpret_1:
 	+token qstack, bl, word, dup, cpeek
@@ -3279,7 +3303,7 @@ compilecomma_1:
 	+token exit
 
 
-+header ~xabortq, ~xabortq_n, "(ABORT\")"
++header ~xabortq, ~xabortq_n
 	+forth
 	+token rat, count
 	+literal NAMEMASK
@@ -4973,9 +4997,16 @@ words_done:
 ; code bye
 +header ~bye, ~bye_n, "BYE"
 	+code
+!ifdef CART {
+; Just reset the state in cartridge mode
+	jmp coldstart
+} else {
+; This works fine on Commander X16 as Forth is only using the user area of the zero page. Unfortunately,
+; there is no such area on C64 - TODO here
 	pla
 	pla
 	rts
+}
 
 ; Search-Order words
 ;
@@ -5099,6 +5130,12 @@ autorun:
 
 ; ==============================================================================
 
+
+!ifdef CART {
+* = $9fff
+	!byte 0
+} else {
 end_of_image:
+}
 
 !symbollist "symbols.txt"
