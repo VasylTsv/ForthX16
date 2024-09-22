@@ -9,13 +9,20 @@ acme --cpu 6502 --outfile fthtx16.prg --format cbm fthtx16.asm
 ```
 The resulting PRG file can be copied to Commander X16 file system (or C64) and loaded as usual. It is thoroughly tested with the emulator, but I don't have access to the actual hardware yet, so let me know if it breaks on metal.
 
-A prebuilt binary can be found in `binary`folder.
+A prebuilt binary can be found in `binary` folder.
 
 A modified copy of dynamic memory support package can be found in `dynamic`.
 
 A modified copy of Forth test suite is in `tests` - copy files from there to the file system of Commander X16 and start it with `INCLUDE RUNTESTS.FTH`. The current version should run all tests without errors. The runtime on the emulator is about 4 minutes on Commander X16 (and a LOT more on C64).
 
 A few examples and benchmarks are in `other` - `BENCH.FTH` and `ERASTO.FTH` are old benchmarking programs calculating primes, practically unchanged (`BENCH` had a few `ENDIF`s replaced by `THEN`s). `RC4TEST.FTH` is a sample from the [Wikipedia](https://en.wikipedia.org/wiki/Forth_(programming_language)) page, unmodified.
+
+Current version finally allows building 8K C64 cartridge. This has not been tested on the real hardware, but works fine in VICE and passes all tests. To build a cartridge, use command lines (cartconv is included with VICE):
+```
+acme --cpu 6502  --outfile fthtx16.rom --format plain buildcrt.asm
+cartconv -t normal -n "Forth TX16" -i fthtx16.rom -o fthtx16.crt
+```
+Both cartridge file and the intermediate ROM image can be found in `binary` folder. There is also a D64 image `tests.d64` there which contains the test suite and the same PRG file - it is possible to run the interpreter from that image or use the image to run the test suite against the cartridge version.
 
 There are a few known issues with the current release.
 * Opening a file for write does not overwrite an existing file. This is actually the default system behavior, but it feels quite wrong now.
