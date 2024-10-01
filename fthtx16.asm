@@ -1,4 +1,5 @@
 ; Forth system for Commander X16 - port of Forth Model T
+; Forth system for Commander X16 - port of Forth Model T
 ; by Vasyl Tsvirkunov
 ; At this point the compliance status is:
 ; * Forth-2012 System
@@ -173,10 +174,11 @@ NEW_LINE = $0D
 +zpbyte ~_current
 +zpword ~_state
 +zpbyte ~_sflip				; flip-flop for S" buffer selection
-+zpword ~_ibufcount			;number of used buffers
++zpbyte ~_ibufcount			; number of used buffers
 +zpword ~_source			; pointer to the current source
 +zpword ~_openfiles			; bitfield for files currently open to translate from C64 to Forth opening semantics
 +zpword ~_eoffiles			; bitfield for files finished reading (set to 0 on open and to 1 when read to EOF)
++zpbyte ~_nodrive			; set if no drive has been detected on startup
 
 +zpbyte ~_stopcheck
 
@@ -510,7 +512,6 @@ STACKLIMIT = DSIZE - 4*SSAFE
 	lda #0
 	sta _sflip
 	sta _ibufcount
-	sta _ibufcount+1
 
 	sta _tib
 	sta _wordbuf
@@ -1168,7 +1169,7 @@ abort_c:
 ;
 ; : (sst) _sourcestack
 ;         2- 0 over ! 2- _tib over ! 2- 0 over ! 2- 0 over ! 2- 4 over !
-;         _source ! 0 dup _sflip ! _ibufcount ! ; nonstandard
+;         _source ! 0 dup _sflip ! _ibufcount c! ; nonstandard
 ;
 
 +header ~xsst, ~xsst_n			; Reset source stack
@@ -1189,7 +1190,7 @@ abort_c:
 	+literal _sflip
 	+token cpoke
 	+literal _ibufcount
-	+token poke, exit
+	+token cpoke, exit
 
 ; ==============================================================================
 ; Integer math
@@ -3074,7 +3075,7 @@ interpret_done:
 	+qbranch_fwd closesource_1
 	+token sourceid, closefile, drop, minusone
 	+literal _ibufcount
-	+token incpoke		; close file and release the buffer
+	+token dup, cpeek, oneplus, swap, cpoke		; close file and release the buffer
 closesource_1:
 	+literal _source
 	+token dup, peek, dup, peek, oneplus
@@ -3785,8 +3786,12 @@ dless_2:
 
 ; This is used to check the drive status which is a rather
 ; complex process on C64. Ignoring responses starting with 0 (no responses start with 1)
+; Note that this would hang if there is no drive attached, requiring an extra check for drive
+; on startup
 +header ~c64iostatus, ~c64iostatus_n
 	+code
+	lda _nodrive
+	bne +
 	ldx #15
 	jsr CHKIN
 	jsr CHRIN
@@ -3986,7 +3991,7 @@ xputchar = emit
 +header ~includefile, ~includefile_n, "INCLUDE-FILE"
 	+forth
 	+literal _ibufcount
-	+token peek
+	+token cpeek
 	+literal 7
 	+token greater
 	+qbranch_fwd includefile_1
@@ -4000,7 +4005,7 @@ includefile_1:
 	+token twominus
 	+literal _ibuf
 	+literal _ibufcount
-	+token peek
+	+token cpeek
 	+literal 100
 	+token mult, add, over, poke
 	+token twominus_zero_over_poke
@@ -4011,7 +4016,7 @@ includefile_1:
 	+literal _source
 	+token poke
 	+literal _ibufcount
-	+token dup, peek, oneplus, swap, poke
+	+token dup, cpeek, oneplus, swap, cpoke
 	+token state, peek
 	+qbranch_fwd includefile_2
 	+token interpret
@@ -5110,6 +5115,12 @@ forth_system_c:
 	+literal forth_wordlist_n
 	+literal _vocsref
 	+token poke
+; Check for drive presence and disable I/O if absent
+	+token one
+	+literal 8
+	+token over, zero, zero, c64open, c64close, c64iseof
+	+literal _nodrive
+	+token cpoke
 ; Open command channel for I/O status monitoring
 	+literal 15
 	+literal 8
