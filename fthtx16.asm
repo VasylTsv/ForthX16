@@ -1,5 +1,4 @@
 ; Forth system for Commander X16 - port of Forth Model T
-; Forth system for Commander X16 - port of Forth Model T
 ; by Vasyl Tsvirkunov
 ; At this point the compliance status is:
 ; * Forth-2012 System
@@ -273,6 +272,16 @@ STACKLIMIT = DSIZE - 4*SSAFE
 	sbc #.op
 	bcs +
 	dex
++
+}
+
+!macro incmem .addr, .val {
+	lda .addr
+	clc
+	adc #.val
+	sta .addr
+	bcc +
+	inc .addr+1
 +
 }
 
@@ -604,12 +613,14 @@ next_ext:
 	inc _ri+1
 +:
 	+stax _scratch
+fragment_1:
 	lda (_scratch),y
 	sta _w
 	iny
 	lda (_scratch),y
 	sta _w+1
 	jmp (_w)
+; end of fragment_1
 
 ; Special entry for tokens 0-16 - the jump from next will lead directly here per the token table.
 ; The assumption is that _scratch has 2x the token id, so the exact page offset required. Token
@@ -671,12 +682,13 @@ invokeax:
 	adc #>TOKENS
 	sta _scratch+1
 	ldy #0
-	lda (_scratch),y
-	sta _w
-	iny
-	lda (_scratch),y
-	sta _w+1
-	jmp (_w)
+	beq fragment_1
+;	lda (_scratch),y
+;	sta _w
+;	iny
+;	lda (_scratch),y
+;	sta _w+1
+;	jmp (_w)
 
 ; CREATED - push the PFA on the stack (default semantics of a word after CREATE)
 ;	push(W+3)	; Note the offset 3 here. "Created" words have JMP CREATED prolog, not RTS!
@@ -947,13 +959,14 @@ gtt_offsetok:
 	dec _scratch
 
 	; step to the previous NFA
-	sec
-	lda _rscratch
-	sbc _wscratch
-	sta _rscratch
-	lda _rscratch+1
-	sbc _wscratch+1
-	sta _rscratch+1
+	jsr rscratch_sub_wscratch
+;	sec
+;	lda _rscratch
+;	sbc _wscratch
+;	sta _rscratch
+;	lda _rscratch+1
+;	sbc _wscratch+1
+;	sta _rscratch+1
 	jmp gtt_next
 
 gtt_done:
@@ -991,6 +1004,17 @@ close_open_files:
 	+stax _openfiles
 	rts
 
+rscratch_sub_wscratch: ; Happens more than once, saving a few bytes here
+	sec
+	lda _rscratch
+	sbc _wscratch
+	sta _rscratch
+	lda _rscratch+1
+	sbc _wscratch+1
+	sta _rscratch+1
+	rts
+
+
 ; ==============================================================================
 ; Forth vocabulary starts here. This special header form reserves 16 tokens for
 ; extended token range. This essentially gives 4K-16 possible tokens maximum,
@@ -1009,6 +1033,7 @@ close_open_files:
 	and #NAMEMASK
 	clc
 	adc #1
+field_adjust:
 	adc _dtop
 	sta _dtop
 	bcc +
@@ -1026,12 +1051,13 @@ close_open_files:
 	iny
 	tya
 	clc
-	adc _dtop
-	sta _dtop
-	bcc +
-	inc _dtop+1
-+:
-	jmp next
+	bcc field_adjust ; identical code and can use C==0 here
+;	adc _dtop
+;	sta _dtop
+;	bcc +
+;	inc _dtop+1
+;+:
+;	jmp next
 
 +header ~cfatolfa, ~cfatolfa_n
 	+forth
@@ -1071,13 +1097,14 @@ lfatonfa_found:
 	lda #>TOKENS
 	adc _dtop+1		; note that C is guaranteed to be 0 here
 	sta _dtop+1
-	ldy #1
-	lda (_dtop),y
-	tax
-	dey
-	lda (_dtop),y
-	+stax _dtop
-	jmp next
+	jmp fragment_peek
+;	ldy #1
+;	lda (_dtop),y
+;	tax
+;	dey
+;	lda (_dtop),y
+;	+stax _dtop
+;	jmp next
 
 
 ; ==============================================================================
@@ -1317,9 +1344,10 @@ negate_c:
 
 +header ~twoplus, ~twoplus_n, "2+"
 	+code
-	+ldax _dtop
-	+incax 2
-	+stax _dtop
+;	+ldax _dtop
+;	+incax 2
+;	+stax _dtop
+	+incmem _dtop, 2
 	jmp next
 
 +header ~twominus, ~twominus_n, "2-"
@@ -1449,16 +1477,17 @@ smrem_2:
 ; As I suspected, the above algorithm is easier to implement on 6502 that it was on that RatVM "architecture". 6502 does
 ; not have hardware divide or multiply, so it has to be implemented this way.
 
-_shigh		= _rscratch
-_slow		= _wscratch
+_shigh		= _wscratch ; dpop_scratch_wscratch requires the first two items used to be assigned to _scratch and _wscratch
+_slow		= _rscratch
 _sdiv		= _scratch
 
 +header ~ummod, ~ummod_n, "UM/MOD"
 	+code
-	+dpop
-	+stax _sdiv
-	+dpop
-	+stax _shigh
+	jsr dpop_scratch_wscratch ; note _sdiv and _shigh assignments
+;	+dpop
+;	+stax _sdiv
+;	+dpop
+;	+stax _shigh
 	+ldax _dtop		; Note that we don't pull the last value from the stack!
 	+stax _slow
 	ldx #17
@@ -1963,10 +1992,11 @@ qdup_1:
 ; (DO) stores on the return stack: leaveaddr, limit, current, (ret) 
 +header ~xdo, ~xdo_n	; (DO)
 	+forth
-	+token rfrom, dup, peek, tor	; forward ref for LEAVE
-	+token rot, tor, swap, tor
-	+token twoplus, tor				; step over the actual forward ref
-	+token exit
+	+branch_fwd xqdo_1
+;	+token rfrom, dup, peek, tor	; forward ref for LEAVE
+;	+token rot, tor, swap, tor
+;	+token twoplus, tor				; step over the actual forward ref
+;	+token exit
 
 +header ~xqdo, ~xqdo_n	; (?DO)
 	+forth
@@ -1985,10 +2015,11 @@ xqdo_1:
 	+token rfrom				; return address is only needed to get the backref
 	+token rfrom, oneplus			; new value of current
 	+token rat, over, equal
-	+qbranch_fwd xloop_1
-	+token twodrop, rdrop, exit	; exit the loop (leaveaddr on the rstack)
-xloop_1:
-	+token tor, peek, tor, exit		; continue the loop
+	+branch_fwd xloop_common
+;	+qbranch_fwd xloop_1
+;	+token twodrop, rdrop, exit	; exit the loop (leaveaddr on the rstack)
+;xloop_1:
+;	+token tor, peek, tor, exit		; continue the loop
 
 +header ~xploop, ~xploop_n	; (+LOOP)
 	+forth
@@ -1998,6 +2029,7 @@ xloop_1:
 	+token rot, over, xor, zerolt, swap ; new diff and step have different signs? / addr, newcur, step^olddiff<0, olddiff
 	+token two, pick, rat, sub		; diff limit and previous current / addr, newcur, s^d, olddiff, newdiff
 	+token xor, zerolt, and_op
+xloop_common:
 	+qbranch_fwd xploop_1  ; or diffs before and after have different signs / newdiff^olddiff < 0
 	+token twodrop, rdrop, exit	; exit the loop (leaveaddr on the rstack)
 xploop_1:
@@ -2074,6 +2106,7 @@ xploop_1:
 
 +header ~rat, ~rat_n, "R@"
 	+code
+rat_common:
 	ldy #3
 	lda (_rstack),y
 	tax
@@ -2113,12 +2146,13 @@ xploop_1:
 	dey
 	lda (_rstack),y
 	+dpush
-	ldy #3
-	lda (_rstack),y
-	tax
-	dey
-	lda (_rstack),y
-	jmp dpush_and_next
+	jmp rat_common
+;	ldy #3
+;	lda (_rstack),y
+;	tax
+;	dey
+;	lda (_rstack),y
+;	jmp dpush_and_next
 
 ; ==============================================================================
 ; Basic memory operations
@@ -2134,6 +2168,7 @@ xploop_1:
 
 +header ~peek, ~peek_n, "@"
 	+code
+fragment_peek:
 	ldy #1
 	lda (_dtop),y
 	tax
@@ -2152,24 +2187,43 @@ xploop_1:
 
 +header ~poke, ~poke_n, "!"
 	+code
-	+dpop
-	+stax _wscratch
-	+dpop
+	ldy #3
+	lda (_dstack),y
+	tax
+	dey
+	lda (_dstack),y
 	ldy #0
-	sta (_wscratch),y
+	sta (_dtop),y
 	txa
 	iny
-	sta (_wscratch),y
-	jmp next
+	bne cpoke_continue
+	
+;	+dpop
+;	+stax _wscratch
+;	+dpop
+;	ldy #0
+;	sta (_wscratch),y
+;	txa
+;	iny
+;	sta (_wscratch),y
+;	jmp next
 
 +header ~cpoke, ~cpoke_n, "C!"
 	+code
-	+dpop
-	+stax _wscratch
-	+dpop
+	ldy #2
+	lda (_dstack),y
 	ldy #0
-	sta (_wscratch),y
+cpoke_continue:
+	sta (_dtop),y
+	+dpop
+	+dpop
 	jmp next
+;	+dpop
+;	+stax _wscratch
+;	+dpop
+;	ldy #0
+;	sta (_wscratch),y
+;	jmp next
 
 +header ~twopoke, ~twopoke_n, "2!"
 	+forth
@@ -2196,10 +2250,13 @@ xploop_1:
 	dey
 	lda (_ri),y
 	+dpush
-	+ldax _ri
-	+incax 2
-	+stax _ri
+fragment_2:
+;	+ldax _ri
+;	+incax 2
+;	+stax _ri
+	+incmem _ri, 2
 	jmp next
+; end of fragment 2
 
 ; This is a shortcut for core use only - will take the 8-bit value instead. LITERAL
 ; does not compile it yet, but it can in theory.
@@ -2396,10 +2453,11 @@ branch_c:
 	stx _rscratch
 	ora _rscratch
 	beq branch_c
-	+ldax _ri
-	+incax 2
-	+stax _ri
-	jmp next
+	jmp fragment_2
+;	+ldax _ri
+;	+incax 2
+;	+stax _ri
+;	jmp next
 
 ; Shorthand variety of BRANCH for core use - threat the next byte as a
 ; relative _forward only_ offset instead of address
@@ -2806,13 +2864,14 @@ xfind_nextword:
 xfind_offsetok:
 	sta _wscratch
 
-	sec
-	lda _rscratch
-	sbc _wscratch
-	sta _rscratch
-	lda _rscratch+1
-	sbc _wscratch+1
-	sta _rscratch+1
+	jsr rscratch_sub_wscratch
+;	sec
+;	lda _rscratch
+;	sbc _wscratch
+;	sta _rscratch
+;	lda _rscratch+1
+;	sbc _wscratch+1
+;	sta _rscratch+1
 	
 	jmp xfind_compare
 
@@ -2861,16 +2920,25 @@ find_next:
 find_exit:
 	+token exit
 
-
-+header ~xdigit, ~xdigit_n	; (DIGIT)
-	+code
-	lda _dtop
+fragment_4:
 	cmp #$40
 	bcc +
 	and #$5f
 +:
 	+sub '0'
 	cmp #10
+	rts
+
++header ~xdigit, ~xdigit_n	; (DIGIT)
+	+code
+	lda _dtop
+	jsr fragment_4
+;	cmp #$40
+;	bcc +
+;	and #$5f
+;+:
+;	+sub '0'
+;	cmp #10
 	bmi xdigit_1
 	+sub 'A'-'0'-10
 	cmp _base
@@ -3073,9 +3141,9 @@ interpret_done:
 	+qbranch_fwd closesource_2						; nothing to do with console source
 	+token sourceid, zerogt
 	+qbranch_fwd closesource_1
-	+token sourceid, closefile, drop, minusone
+	+token sourceid, closefile, drop ;, minusone
 	+literal _ibufcount
-	+token dup, cpeek, oneplus, swap, cpoke		; close file and release the buffer
+	+token dup, cpeek, oneminus, swap, cpoke		; close file and release the buffer
 closesource_1:
 	+literal _source
 	+token dup, peek, dup, peek, oneplus
@@ -3438,14 +3506,23 @@ spaces_2:
 	+token drop, exit
 
 ; In optional String word set
-+header ~cmove, ~cmove_n, "CMOVE"
-	+code
+dpop_scratch_wscratch: ; used in quite a few places
 	+dpop
 	+stax _scratch
 	+dpop
 	+stax _wscratch
+	rts
+
+dpop_scratch_wscratch_rscratch:
+	jsr dpop_scratch_wscratch
 	+dpop
 	+stax _rscratch
+	rts
+	
+
++header ~cmove, ~cmove_n, "CMOVE"
+	+code
+	jsr dpop_scratch_wscratch_rscratch
 	
 	ldy #0
 	ldx _scratch+1
@@ -3475,12 +3552,13 @@ movedown_4:
 ; In optional String word set
 +header ~cmovex, ~cmovex_n, "CMOVE>"
 	+code
-	+dpop
-	+stax _scratch
-	+dpop
-	+stax _wscratch
-	+dpop
-	+stax _rscratch
+	jsr dpop_scratch_wscratch_rscratch
+;	+dpop
+;	+stax _scratch
+;	+dpop
+;	+stax _wscratch
+;	+dpop
+;	+stax _rscratch
 	
 	ldx _scratch+1
 	txa
@@ -3531,10 +3609,11 @@ _stemp = _scratch_2
 
 +header ~smove, ~smove_n	; SMOVE
 	+code
-	+dpop
-	+stax _scratch
-	+dpop
-	+stax _wscratch
+	jsr dpop_scratch_wscratch
+;	+dpop
+;	+stax _scratch
+;	+dpop
+;	+stax _wscratch
 	+ldax _dtop
 	+stax _rscratch
 	
@@ -3575,9 +3654,10 @@ smove_char:
 	beq smove_7			; end of the string
 	cmp #'\\'
 	bne smove_8			; is this an escaped character
-	+inc16 _sactual
-	+inc16 _rscratch
-	lda (_rscratch),y
+	jsr smove_fragment
+;	+inc16 _sactual
+;	+inc16 _rscratch
+;	lda (_rscratch),y
 	and #$5f			; case insensitive
 	cmp #'M'
 	bne smove_9			; 'm' translated into two character
@@ -3590,18 +3670,20 @@ smove_char:
 smove_9:
 	cmp #'X'			; 'x' is a hex sequence
 	bne smove_10
-	+inc16 _sactual
-	+inc16 _rscratch
-	lda (_rscratch),y
+	jsr smove_fragment
+;	+inc16 _sactual
+;	+inc16 _rscratch
+;	lda (_rscratch),y
 	jsr smove_hexdigit
 	asl
 	asl
 	asl
 	asl
 	sta _stemp
-	+inc16 _sactual
-	+inc16 _rscratch
-	lda (_rscratch),y
+	jsr smove_fragment
+;	+inc16 _sactual
+;	+inc16 _rscratch
+;	lda (_rscratch),y
 	jsr smove_hexdigit
 	ora _stemp
 	jmp smove_8
@@ -3629,15 +3711,22 @@ smove_7:
 	rts
 
 smove_hexdigit:
-	cmp #$40
-	bcc +
-	and #$5f
-+:
-	+sub '0'
-	cmp #10
+	jsr fragment_4
+;	cmp #$40
+;	bcc +
+;	and #$5f
+;+:
+;	+sub '0'
+;	cmp #10
 	bmi smove_h1
 	+sub 'A'-'0'-10
 smove_h1:
+	rts
+
+smove_fragment:
+	+inc16 _sactual
+	+inc16 _rscratch
+	lda (_rscratch),y
 	rts
 
 smove_subst:
@@ -3671,15 +3760,17 @@ fill_2:
 ; ==============================================================================
 ; More words from the optional Double-Number word set
 
-wlow = _scratch
-whigh = _rscratch
+; For possible optimizations we assign scratch, wscratch, and rscratch in the order of use
+wlow = _wscratch
+whigh = _scratch
 
 +header ~dadd, ~dadd_n, "D+"
 	+code
-	+dpop
-	+stax whigh
-	+dpop
-	+stax wlow
+	jsr dpop_scratch_wscratch ; see the note about scratch assignments above
+;	+dpop
+;	+stax whigh
+;	+dpop
+;	+stax wlow
 	+dpop
 	tay
 	clc
@@ -4656,11 +4747,11 @@ dots_2:
 	+forth
 	+token fmark, exit
 
-
+; See the note before "D+"
 cstr1 = _dtop
-clen1 = _scratch
-cstr2 = _rscratch
-clen2 = _wscratch
+clen1 = _rscratch
+cstr2 = _wscratch
+clen2 = _scratch
 
 ; COMPARE became standard in the later versions of the language.
 ; In optional String word set
@@ -4668,12 +4759,13 @@ clen2 = _wscratch
 ; (caddr1, u1, caddr2, u2 -> n)
 +header ~compare, ~compare_n, "COMPARE"
 	+code
-	+dpop
-	+stax clen2
-	+dpop
-	+stax cstr2
-	+dpop
-	+stax clen1
+	jsr dpop_scratch_wscratch_rscratch
+;	+dpop
+;	+stax clen2
+;	+dpop
+;	+stax cstr2
+;	+dpop
+;	+stax clen1
 	; and cstr1 is already where it should be. No need to pop as the result will be written there
 
 	ldy #0
