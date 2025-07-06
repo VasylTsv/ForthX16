@@ -319,18 +319,6 @@ STACKLIMIT = DSIZE - 4*SSAFE
 	jsr pop_dstack
 }
 
-!macro init_rstack {
-	lda #<RSTACK_INIT
-	ldx #>RSTACK_INIT
-	+stax _rstack
-}
-
-!macro init_dstack {
-	lda #<DSTACK_INIT
-	ldx #>DSTACK_INIT
-	+stax _dstack
-}
-
 ; Elements of Forth word definition
 
 ; Complete word header including name, flags, and links
@@ -515,8 +503,8 @@ STACKLIMIT = DSIZE - 4*SSAFE
 	ldx #>forth_system_c
 	+stax _ri				; _w does not need to be initialized
 
-	+init_rstack
-	+init_dstack
+	jsr init_rstack
+	jsr init_dstack
 
 	lda #0
 	sta _sflip
@@ -782,6 +770,18 @@ contforth:
 
 ; Return stack and data stack implementations, using correspondingly _rstack and _dstack pointers.
 ; Note that the data stack has the topmost item stored separately in _dtop
+
+init_rstack:
+	lda #<RSTACK_INIT
+	ldx #>RSTACK_INIT
+	+stax _rstack
+	rts
+
+init_dstack:
+	lda #<DSTACK_INIT
+	ldx #>DSTACK_INIT
+	+stax _dstack
+	rts
 
 push_rstack:
 	ldy #0
@@ -1184,7 +1184,7 @@ cfatoxt_found:		; Unless the system is broken, something has to be found and C i
 +header ~abort, ~abort_n, "ABORT"
 	+code
 abort_c:
-	+init_dstack
+	jsr init_dstack
 	jsr close_open_files
 	jmp quit_c
 
@@ -1483,13 +1483,13 @@ _sdiv		= _scratch
 
 +header ~ummod, ~ummod_n, "UM/MOD"
 	+code
-	jsr dpop_scratch_wscratch ; note _sdiv and _shigh assignments
+	jsr dpop_scratch_wscratch_dtopto_rscratch ; note _sdiv and _shigh assignments
 ;	+dpop
 ;	+stax _sdiv
 ;	+dpop
 ;	+stax _shigh
-	+ldax _dtop		; Note that we don't pull the last value from the stack!
-	+stax _slow
+;	+ldax _dtop		; Note that we don't pull the last value from the stack!
+;	+stax _slow
 	ldx #17
 ummod_1:
 	dex
@@ -1764,18 +1764,19 @@ freebit_2:
 	bvc less_y1
 	eor #$80
 less_y1:
-	bmi less_y4
+	bmi less_true
 	bvc less_y2
 	eor #$80
 less_y2:
-	bne less_y3
+	bne less_false
 	lda _dtop
 	sbc _scratch
-	bcc less_y4
-less_y3:
+less_result:
+	bcc less_true
+less_false:
 	lda #0
 	jmp less_y5
-less_y4:
+less_true:
 	lda #255
 less_y5:
 	sta _dtop
@@ -1802,20 +1803,23 @@ less_y5:
 	+stax _scratch
 	lda _dtop+1
 	cmp _scratch+1
-	bcc uless_t
-	bne uless_f
+;	bcc uless_t
+;	bne uless_f
+	bcc less_true
+	bne less_false
 	lda _dtop
 	cmp _scratch
-	bcc uless_t
-uless_f:
-	lda #0
-	jmp uless_1
-uless_t:
-	lda #255
-uless_1:
-	sta _dtop
-	sta _dtop+1
-	jmp next
+	jmp less_result
+;	bcc uless_t
+;uless_f:
+;	lda #0
+;	jmp uless_1
+;uless_t:
+;	lda #255
+;uless_1:
+;	sta _dtop
+;	sta _dtop+1
+;	jmp next
 
 ;
 ;	: u> swap u< ;
@@ -3141,7 +3145,7 @@ interpret_done:
 	+qbranch_fwd closesource_2						; nothing to do with console source
 	+token sourceid, zerogt
 	+qbranch_fwd closesource_1
-	+token sourceid, closefile, drop ;, minusone
+	+token sourceid, closefile, drop
 	+literal _ibufcount
 	+token dup, cpeek, oneminus, swap, cpoke		; close file and release the buffer
 closesource_1:
@@ -3387,7 +3391,7 @@ quit_c:
 	lda #0
 	sta _openfiles+1
 	
-	+init_rstack
+	jsr init_rstack
 	lda #<forth_system_r		; don't show the banner
 	ldx #>forth_system_r
 	+stax _ri
@@ -3519,6 +3523,12 @@ dpop_scratch_wscratch_rscratch:
 	+stax _rscratch
 	rts
 	
+dpop_scratch_wscratch_dtopto_rscratch:
+	jsr dpop_scratch_wscratch
+	+ldax _dtop
+	+stax _rscratch
+	rts
+
 
 +header ~cmove, ~cmove_n, "CMOVE"
 	+code
@@ -3609,13 +3619,13 @@ _stemp = _scratch_2
 
 +header ~smove, ~smove_n	; SMOVE
 	+code
-	jsr dpop_scratch_wscratch
+	jsr dpop_scratch_wscratch_dtopto_rscratch
 ;	+dpop
 ;	+stax _scratch
 ;	+dpop
 ;	+stax _wscratch
-	+ldax _dtop
-	+stax _rscratch
+;	+ldax _dtop
+;	+stax _rscratch
 	
 	lda #0
 	sta _sactual
@@ -3913,15 +3923,25 @@ dless_2:
 ro_v:
 	+string ",S,R"
 
-+header ~openfile, ~openfile_n, "OPEN-FILE"
++header ~prepfname, ~prepfname_n
 	+forth
-	+token tor
-	+literal of_1
 	+token count
 	+literal _fnamebuf
 	+token place
 	+literal _fnamebuf
 	+token plusplace
+	+token exit
+
++header ~openfile, ~openfile_n, "OPEN-FILE"
+	+forth
+	+token tor
+	+literal of_1
+	+token prepfname
+;	+token count
+;	+literal _fnamebuf
+;	+token place
+;	+literal _fnamebuf
+;	+token plusplace
 	+token rfrom, count
 	+literal _fnamebuf
 	+token plusplace
@@ -4137,6 +4157,15 @@ included_2:
 required_1:
 	+token drop, included, exit
 
+; Common code for S" and S\"
++header ~getstringbuf, ~getstringbuf_n
+	+forth
+	+literal _sbuf
+	+literal _sflip
+	+token cpeek
+	+literal 100
+	+token mult, add, exit
+
 ; ============================================================================
 ; Here lies an important boundary - all words above it are used in other core
 ; words, everythign below is unreferenced. The order is important, so smaller
@@ -4171,11 +4200,12 @@ wo_v:
 +header ~deletefile, ~deletefile_n, "DELETE-FILE"
 	+forth
 	+literal df_1
-	+token count
-	+literal _fnamebuf
-	+token place
-	+literal _fnamebuf
-	+token plusplace
+	+token prepfname
+;	+token count
+;	+literal _fnamebuf
+;	+token place
+;	+literal _fnamebuf
+;	+token plusplace
 	+literal _fnamebuf
 	+token count
 	+literal 15
@@ -4188,11 +4218,12 @@ df_1:
 +header ~renamefile, ~renamefile_n, "RENAME-FILE"
 	+forth
 	+literal rf_1
-	+token count
-	+literal _fnamebuf
-	+token place
-	+literal _fnamebuf
-	+token plusplace
+	+token prepfname
+;	+token count
+;	+literal _fnamebuf
+;	+token place
+;	+literal _fnamebuf
+;	+token plusplace
 	+literal rf_2
 	+token count
 	+literal _fnamebuf
@@ -4576,11 +4607,13 @@ to_1:
 squote_1:
 	+literal '"'
 	+token parse
-	+literal _sbuf
-	+literal _sflip
-	+token cpeek
-	+literal 100
-	+token mult, add, swap, twotor, tworat, cmove
+	+token getstringbuf
+;	+literal _sbuf
+;	+literal _sflip
+;	+token cpeek
+;	+literal 100
+;	+token mult, add
+	+token swap, twotor, tworat, cmove
 	+token tworfrom
 	+literal _sflip
 	+token dup, cpeek, one, xor, swap, cpoke, exit 
@@ -4588,11 +4621,13 @@ squote_1:
 +header ~ssquote, ~ssquote_n, "S\\\"", IMM_FLAG
 	+forth
 	+token tib, ptrin, peek, add
-	+literal _sbuf
-	+literal _sflip
-	+token cpeek
-	+literal 100
-	+token mult, add, numtib, peek
+	+token getstringbuf
+;	+literal _sbuf
+;	+literal _sflip
+;	+token cpeek
+;	+literal 100
+;	+token mult, add
+	+token numtib, peek
 	+token ptrin, peek, sub, over, tor
 	+token smove, swap, ptrin, incpoke
 	+token rfrom, swap
