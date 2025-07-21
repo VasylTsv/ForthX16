@@ -1,3 +1,2 @@
-CART = 1
-C64 = 1
+F256 = 1
 !source "fthtx16.asm"

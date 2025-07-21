@@ -38,6 +38,19 @@
 ;	C64 PETSCII charset does not have backslash. Pound symbol is used instead
 ;	It does not have tilde either. Not used in standard words, but it is used in test suite
 
+; ACME does not assume non-existing symbols to resolve to 0, forcing it here
+!ifndef C64 {
+C64 = 0
+}
+!ifndef CART {
+CART = 0
+}
+!ifndef F256 {
+F256 = 0
+}
+
+
+!if C64 {
 ; KERNAL entries
 SETLFS = $FFBA
 SETNAM = $FFBD
@@ -57,7 +70,7 @@ RAMTAS = $ff87
 RESTOR = $ff8a
 SCINIT = $ff81
 
-!ifdef CART {
+!if CART {
 * = $8000
 start_of_image:
 	!word coldstart
@@ -81,7 +94,28 @@ start_of_image:
     !byte $0b,$08,$01,$00,$9e,$32,$30,$36,$31,$00,$00,$00
 }
 
+CODESTART = *
+} else if F256 {
+!source "api_acme.asm"
+!source "pgz.asm"
+
++PGZ_HEADER
++SEGMENT start_of_image, end_of_image
+
+CODESTART = $200
+} else {
+!error "Not implemented"
+}
+
 !convtab raw
+
+!pseudopc CODESTART {
+
+!if F256 {
+start_of_image:
+	jsr init_console
+	jsr cls
+}
 
 ; ==============================================================================
 ; Definitions - constants and variables. Unlike the original RatVM, C64 has some
@@ -175,9 +209,13 @@ NEW_LINE = $0D
 +zpbyte ~_sflip				; flip-flop for S" buffer selection
 +zpbyte ~_ibufcount			; number of used buffers
 +zpword ~_source			; pointer to the current source
+!if C64 {
 +zpword ~_openfiles			; bitfield for files currently open to translate from C64 to Forth opening semantics
 +zpword ~_eoffiles			; bitfield for files finished reading (set to 0 on open and to 1 when read to EOF)
 +zpbyte ~_nodrive			; set if no drive has been detected on startup
+} else if F256 {
++zpbyte ~_drive				; drive for file operations
+}
 
 +zpbyte ~_stopcheck
 
@@ -206,15 +244,26 @@ NEW_LINE = $0D
 	!set __hm_addr = .name
 }
 
-!ifdef CART {
+!if CART {
 +high_memory_begin $8000
-} else {
+} else if C64 {
 +high_memory_begin $a000
+} else if F256 {
++high_memory_begin $c000
+} else {
+!error "Not implemented"
 }
 
 +hmbuffer ~TOKENS, 2*TOKEN_COUNT	; token lookup table (XT->CFA)
 +hmbuffer ~RSTACK, RSIZE		; return stack
 +hmbuffer ~DSTACK, DSIZE		; data stack
+
+!if F256 {
++hmbuffer ~_streambuffer, 8*64		; filesystem read buffers. Using 64-byte buffers as there is actual limit
++hmbuffer ~_streamptr, 8		; in ReadData in microkernel for IEC devices. Should be good enough for SD
++hmbuffer ~_streamload, 8		; card anyway
++hmbuffer ~_streamid, 8			; the Forth system will be using buffer IDs instead of direct stream IDs
+}
 
 +hmbuffer ~_ibuf, 7*100			; seven 100-char buffers for INCLUDE-FILE
 +hmbuffer ~_sbuf, 2*100			; two 100-char buffers for S" / S\"
@@ -513,15 +562,19 @@ STACKLIMIT = DSIZE - 4*SSAFE
 	sta _tib
 	sta _wordbuf
 
+!if C64 {
 	sta _openfiles+1
 	lda #7			; do not try to open 0-2
 	sta _openfiles
+} else if F256 {
+	jsr f256buffersinit	
+}
 
 	lda #<forth_system_n
 	ldx #>forth_system_n
 	+stax _latest
 	
-!ifdef CART {
+!if CART {
 	lda #<$0801
 	ldx #>$0801
 } else {
@@ -635,7 +688,25 @@ call:
 ; STOP key handler will trigger on every 256th execution of call
 	inc _stopcheck
 	bne +
+!if C64 {
 	jsr STOP
+} else if F256 {
+-:
+	jsr kernel_Yield
+	jsr kernel_NextEvent
+	bcs +
+	lda event_buffer+off_event_type    
+	cmp #kernel_event_key_RELEASED
+	bne -
+	lda event_buffer+off_event_key_flags 
+	and #event_key_META
+	bne +
+	lda event_buffer+off_event_key_ascii
+	cmp #3
+} else {
+!error "Not implemented"
+}
+
 	bne +
 	jmp abort_c
 +:
@@ -987,22 +1058,6 @@ gtt_done:
 
 	rts
 
-; Close file handles 3-14, this is used in ABORT to reset the error state
-close_open_files:
-	lda #3
-	sta _scratch
--:
-	lda _scratch
-	cmp #15
-	beq +
-	jsr CLOSE
-	inc _scratch
-	bne -
-+:
-	lda #7		; protect channels 0-2 and 15
-	ldx #128
-	+stax _openfiles
-	rts
 
 rscratch_sub_wscratch: ; Happens more than once, saving a few bytes here
 	sec
@@ -1660,26 +1715,19 @@ mmult_1:
 ; Find lowest zero (free) bit index
 +header ~freebit, ~freebit_n
 	+code
-	lda _dtop
-	sta _rscratch
-	lda _dtop+1
-	sta _rscratch+1
-	lda #0
-	tax
-	sta _dtop
-	sta _dtop+1
-freebit_1:
-	lda #1
-	bit _rscratch
-	beq freebit_2
-	lsr _rscratch+1
-	ror _rscratch
+	ldx #0
+-:
+	lsr _dtop+1
+	ror _dtop
+	bcc +
 	inx
-	jmp freebit_1
-freebit_2:
-	txa
-	sta _dtop
-	jmp next
+	bne -
++:
+	stx _dtop
+	lda #0
+	sta _dtop+1
+	jmp next	
+
 
 +header ~setbit, ~setbit_n
 	+forth
@@ -1757,31 +1805,28 @@ freebit_2:
 +header ~less, ~less_n, "<"
 	+code
 	+dpop
-	+stax _scratch
-	sec
+	sta _scratch
+	txa
+	eor #$80
+	sta _scratch+1
 	lda _dtop+1
-	sbc _scratch+1
-	bvc less_y1
 	eor #$80
-less_y1:
-	bmi less_true
-	bvc less_y2
-	eor #$80
-less_y2:
+	cmp _scratch+1
+	bcc less_true
 	bne less_false
 	lda _dtop
-	sbc _scratch
+	cmp _scratch
 less_result:
 	bcc less_true
 less_false:
 	lda #0
-	jmp less_y5
+-:
+	tax
+	+stax _dtop
+	jmp next
 less_true:
 	lda #255
-less_y5:
-	sta _dtop
-	sta _dtop+1
-	jmp next
+	bne -
 
 ;
 ;	: > swap < ;
@@ -2405,13 +2450,16 @@ sign_1:
 
 +header ~allot, ~allot_n, "ALLOT"
 	+forth
-	+token dup, unused, greater
+	+token here, add, dup
+	+literal MEMTOP
+	+token ugreater
 	+qbranch_fwd allot_ok
 	+token xabortq
 	+string "?MEM"
 allot_ok:
 	+literal _here
-	+token incpoke, exit
+	+token poke, exit
+
 
 +header ~unused, ~unused_n, "UNUSED"
 	+forth
@@ -2523,6 +2571,7 @@ qbbranch_1:
 +header ~accept, ~accept_n, "ACCEPT"
 	+code
 	+dpop
+!if C64 {
 	sta _rscratch ; Note that this only works properly for small numbers, but this is platform-consistent anyway
 	ldy #0
 accept_1:
@@ -2539,6 +2588,17 @@ accept_2:
 	sty _dtop
 	lda #0
 	sta _dtop+1
+} else if F256 {
+	tay
+	+ldax _dtop
+	jsr gets
+	sty _dtop
+	stz _dtop+1
+	jsr newline
+} else {
+!error "Not implemented"
+}
+
 	jmp next
 
 ; : refill source-id 0< if false exit then
@@ -2586,7 +2646,19 @@ prompt:
 +header ~emit, ~emit_n, "EMIT"
 	+code
 	+dpop
+!if C64 {
 	jsr CHROUT
+} else if F256 {
+	cmp #13
+	bne +
+	jsr newline
+	jmp next
++:	
+	jsr putc
+} else {
+!error "Not implemented"
+}
+
 	jmp next
 
 ; : cr 13 emit ;
@@ -3385,11 +3457,20 @@ compilecomma_1:
 +header ~xquit, ~xquit_n
 	+code
 quit_c:
-	jsr CLRCHN
-	lda #7			; do not try to open 0-2
-	sta _openfiles
-	lda #0
-	sta _openfiles+1
+!if C64 {
+; TODO - close_open_files seems to be more consistent and safer here
+;	jsr CLRCHN
+;	lda #7			; do not try to open 0-2
+;	sta _openfiles
+;	lda #0
+;	sta _openfiles+1
+	jsr close_open_files
+} else if F256 {
+	jsr close_open_files
+} else {
+!error "Not implemented"
+}
+
 	
 	jsr init_rstack
 	lda #<forth_system_r		; don't show the banner
@@ -3849,90 +3930,26 @@ dless_2:
 ; Forth standard makes assumptions about I/O capabilities that are simply not true
 ; for most 8-bit systems. Implementing as much as possible to get the system going
 
-; Full equivalent to C64 OPEN, not exposed to dictionary yet
-; Note that it requires 5 stack parameters as the string is enchoded as (c_addr,u)
-; Top of data stack will have filenum or 0 on error
-+header ~c64open, ~c64open_n
-	+code
-	+dpop
-	; Note that A is set exactly to what we need there
-	ldx _dtop
-	ldy _dtop+1
-	jsr SETNAM
-	+dpop
-	lda _dtop
-	pha
-	+dpop
-	lda _dtop
-	pha
-	+dpop
-	pla
-	tax
-	pla
-	tay
-	lda _dtop
-	pha
-	jsr SETLFS
-	jsr OPEN
-	pla
-	ldx #0
-	jmp next
-
-; Corresponding equivalent to CLOSE
-+header ~c64close, ~c64close_n
-	+code
-	+dpop
-	jsr CLOSE
-	jmp next
-
-; This is used to check the drive status which is a rather
-; complex process on C64. Ignoring responses starting with 0 (no responses start with 1)
-; Note that this would hang if there is no drive attached, requiring an extra check for drive
-; on startup
-+header ~c64iostatus, ~c64iostatus_n
-	+code
-	lda _nodrive
-	bne +
-	ldx #15
-	jsr CHKIN
-	jsr CHRIN
-	pha
--:
-	jsr CHRIN
-	cmp #NEW_LINE
-	bne -
-	jsr CLRCHN
-	pla
-	cmp #'2'
-	bcs +
-	lda #0
-+:
-	tax
-	jmp dpush_and_next
-
-; This will actually report other I/O errors, but this should be fine
-+header ~c64iseof, ~c64iseof_n
-	+code
-	jsr READST
-	tax
-	jmp dpush_and_next
+!if C64 {
+!source "fileio_c64.asm"
+} else if F256 {
+!source "fileio_f256.asm"
+}
 
 +header ~ro, ~ro_n, "R/O"
 	+code doconst
+!if C64 {
 	+value ro_v
 ro_v:
 	+string ",S,R"
-
-+header ~prepfname, ~prepfname_n
-	+forth
-	+token count
-	+literal _fnamebuf
-	+token place
-	+literal _fnamebuf
-	+token plusplace
-	+token exit
+} else if F256 {
+	+value kernel_args_file_open_READ
+} else {
+!error "Not implemented"
+}
 
 +header ~openfile, ~openfile_n, "OPEN-FILE"
+!if C64 {
 	+forth
 	+token tor
 	+literal of_1
@@ -3967,14 +3984,49 @@ of_2:
 	+token exit
 of_1:
 	+string "O0:"
+} else if F256 {
+	+code
+	+dpop
+	sta _scratch
+	+dpop
+	tay
+	+ldax _dtop
+	jsr f256open
+	bcs +
+	sta _dtop
+	stz _dtop+1
+	lda #0
+-:	
+	tax
+	jmp dpush_and_next
++:
+	lda #1
+	bra -
+} else {
+!error "Not implemented"
+}
+
 
 +header ~closefile, ~closefile_n, "CLOSE-FILE"
+!if C64 {
 	+forth
 	+token dup
 	+literal _openfiles
 	+token clearbit, c64close, zero, exit
+} else if F256 {
+	+code
+	ldy _dtop
+	jsr f256close
+	stz _dtop
+	jmp next
+} else {
+!error "Not implemented"
+}
+
 
 ; Cannot be implemented on C64
+; In theory, this can be implemented on F256 but I want to keep feature
+; parity for now.
 +header ~repositionfile, ~repositionfile_n, "REPOSITION-FILE"
 	+forth
 	+token drop, twodrop, minusone, exit
@@ -3993,110 +4045,134 @@ of_1:
 filestatus_1:
 	+token closefile, zero, exit
 
-; Set/unset channel for read and write, these need to follow after each other to
-; save on common code
-+header ~setread, ~setread_n
-	+code
-	+dpop
-	tax
-	beq +
-	jsr CHKIN
-	jmp next
-
-+header ~setwrite, ~setwrite_n
-	+code
-	+dpop
-	tax
-	beq +
-	jsr CHKOUT
-	jmp next
-+:
-	jsr CLRCHN
-	jmp next
-
-+header ~xreadchar, ~xreadchar_n
-	+code
-	jsr CHRIN
-	ldx #0
-	and #$7F		; Ignore high bit (so Shift-Space is not a problem)
-	cmp #10			; Do two substitutions: \n -> \r and \t -> ' ' (actually, everything until \t)
-	bne +
-	lda #NEW_LINE
-+:
-	bcs +
-	lda #32
-+:
-	jmp dpush_and_next
-
-+header ~xreadcharchecked, ~xreadcharchecked_n
-	+forth
-	+token xreadchar, dup
-	+literal NEW_LINE
-	+token equal, exit
-
-+header ~xreadbyte, ~xreadbyte_n
-	+code
-	jsr CHRIN
-	ldx #0
-	+dpush
-	lda #0
-	tax
-	jmp dpush_and_next
-
-; This is the common code of READ-LINE and READ-FILE. There are only two differences between them -
-; that READ-LINE stops on NL and there is one extra return value. Making internal reader vectorized
-; takes care of the first issue, the second one is trivial.
-
-_bytereader = _scratch_1
-
-+header ~readgen, ~readgen_n
-	+forth
-	+literal _bytereader
-	+token cpoke
-	+token dup
-	+literal _eoffiles
-	+token getbit
-	+qbranch_fwd readgen_good
-	+token twodrop, drop, zero, false, zero, exit	; remove three parameters and put three 0s
-readgen_good:
-	+token dup, tor, setread, swap, dup, rot, add, over	; c-addr, c-addr-limit, current; fileid is accessible on the rstack
-readgen_loop:
-	+token twodup, swap, uless			; compare current < c-addr-limit
-	+qbranch_fwd readgen_done			; finished?
-	+literal _bytereader
-	+token cpeek, execute
-	+token tor, over, cpoke, oneplus, rfrom	; append to buffer
-	+token c64iseof, twodup, or	; top of the stack: NL, EOF, true if either is set
-	+qbranch_fwd readgen_continue
-	+qbranch_fwd readgen_noteof
-	+token rat
-	+literal _eoffiles
-	+token setbit						; just set the flag, it will block the following attempts
-readgen_noteof:
-	+qbranch_fwd readgen_done
-	+token oneminus						; NL is not supposed to be included in the count
-readgen_done:
-	+token nip, swap, sub				; drop c-addr-limit; current - c-addr
-	+token zero, setread
-	+token rdrop, true, c64iostatus, exit
-readgen_continue:
-	+token twodrop
-	+branch readgen_loop					; remove both NL and EOF flags and proceed to the next char
-
 +header ~readline, ~readline_n, "READ-LINE"
+!if C64 {
 	+forth
 	+literal xreadcharchecked
 	+token readgen, exit
+} else if F256 {
+rl_stream = _scratch_1
+rl_limit = _scratch_1+1
+	+code
+	+dpop
+	sta rl_stream
+	+dpop
+	sta rl_limit
 
-xputchar = emit
+	ldy #0
+-:
+	cpy rl_limit
+	beq +
+	phy
+	ldy rl_stream
+	jsr f256readchar
+	ply
+	bcs	rl_eos
+	cmp #10
+	beq +
+	cmp #13
+	beq +
+	sta (_dtop),y
+	iny
+	bra -
+
+rl_eos:
+	beq rl_fail		; some chars collected before eos - success
+	
++:
+	stz _dtop+1
+	sty _dtop
+	lda #255	; success line returns count, true, 0
+-:
+	tax
+	+dpush
+	
+	lda #0
+	tax
+	jmp dpush_and_next
+rl_fail:
+	lda #0		; failed line return 0, false, 0
+	bra -
+} else {
+!error "Not implemented"
+}
+
 
 +header ~writefile, ~writefile_n, "WRITE-FILE"
+!if C64 {
 	+forth
 	+token setwrite, type, zero, setwrite, c64iostatus, exit
+} else if F256 {
+wf_limit = _scratch_1
+	+code
+	+dpop
+	sta _scratch
+	+dpop
+	cmp #0			; writing 0 bytes is not an error
+	bne +
+	cpx #0
+	beq wf_done
++:
+	+stax wf_limit
+-:
+	ldy #64
+	sec
+	lda wf_limit
+	sbc #64
+	sta wf_limit
+	bcs +
+	dec wf_limit+1
+	bpl +
+	tya				; adjust the size of the last write
+	clc
+	adc wf_limit
+	tay
+	stz wf_limit
+	stz wf_limit+1
++:
+	+ldax _dtop
+	jsr f256write
+	bcs wf_error
+	clc
+	lda _dtop
+	adc #64
+	sta _dtop
+	bcc +
+	inc _dtop+1
++:
+	lda wf_limit
+	bne -
+	lda wf_limit+1
+	bne -
+	
+wf_done:
+	lda #0
+-:
+	tax
+	+stax _dtop
+	jmp next
+
+wf_error:
+	lda #255
+	bne -
+} else {
+!error "Not implemented"
+}
 
 +header ~writeline, ~writeline_n, "WRITE-LINE"
+!if C64 {
 	+forth
 	+token setwrite, type, cr, zero, setwrite, c64iostatus, exit
+} else if F256 {
+	+forth
+	+token dup, tor, writefile
+	+literal lineend
+	+token one, rfrom, writefile, or
+	+token exit
+lineend !byte NEW_LINE
+} else {
+!error "Not implemented"
+}
 
 +error_message ~includefile_error
 +header ~includefile, ~includefile_n, "INCLUDE-FILE"
@@ -4182,14 +4258,26 @@ required_1:
 
 +header ~wo, ~wo_n, "W/O"
 	+code doconst
+!if C64 {
 	+value wo_v
 wo_v:
 	+string ",S,W"
+} else if F256 {
+	+value kernel_args_file_open_WRITE
+} else {
+!error "Not implemented"
+}
 
 ; This may not be supported on C64, making it identical to W/O
 +header ~rw, ~rw_n, "R/W"
 	+code doconst
+!if C64 {
 	+value wo_v
+} else if F256 {
+	+value kernel_args_file_open_WRITE
+} else {
+!error "Not implemented"
+}
 
 ; For C64 OPEN-FILE and CREATE-FILE are identical
 +header ~createfile, ~createfile_n, "CREATE-FILE"
@@ -4198,6 +4286,7 @@ wo_v:
 
 ; C64 equivalent: PRINT#15,"S0:Name"
 +header ~deletefile, ~deletefile_n, "DELETE-FILE"
+!if C64 {
 	+forth
 	+literal df_1
 	+token prepfname
@@ -4212,10 +4301,45 @@ wo_v:
 	+token writeline, exit
 df_1:
 	+string "S0:"
+} else if F256 {
+	+code
+	lda _drive
+	sta kernel_args_file_delete_drive
+	+dpop
+	sta kernel_args_file_delete_fname_len
+	+ldax _dtop
+	+stax kernel_args_file_delete_fname
+	jsr kernel_File_Delete
+	bcs df_error
+	
+-:
+	jsr kernel_Yield
+	jsr kernel_NextEvent
+	bcs -
+	
+	lda event_buffer+off_event_type
+	cmp #kernel_event_file_ERROR
+	beq df_error
+	cmp #kernel_event_file_DELETED
+	bne -
+
+	lda #0
+-:
+	tax
+	+stax _dtop
+	jmp next
+
+df_error:
+	lda #255
+	bne -
+} else {
+!error "Not implemented"
+}
 
 ; C64 equivalent: PRINT#15,"R0:NewName=OldName"
 ; Note that this is the only word that uses PAD
 +header ~renamefile, ~renamefile_n, "RENAME-FILE"
+!if C64 {
 	+forth
 	+literal rf_1
 	+token prepfname
@@ -4238,6 +4362,44 @@ rf_1:
 	+string "R0:"
 rf_2:
 	+string "="
+} else if F256 {
+	+code
+	lda _drive
+	sta kernel_args_file_rename_drive
+	+dpop
+	sta kernel_args_file_rename_new_len
+	+dpop
+	+stax kernel_args_file_rename_new
+	+dpop
+	sta kernel_args_file_rename_old_len
+	+ldax _dtop
+	+stax kernel_args_file_rename_old
+	jsr kernel_File_Rename
+	bcs rf_error
+	
+-:
+	jsr kernel_Yield
+	jsr kernel_NextEvent
+	bcs -
+	
+	lda event_buffer+off_event_type
+	cmp #kernel_event_file_ERROR
+	beq rf_error
+	cmp #kernel_event_file_RENAMED
+	bne -
+
+	lda #0
+-:
+	tax
+	+stax _dtop
+	jmp next
+
+rf_error:
+	lda #255
+	bne -
+} else {
+!error "Not implemented"
+}
 
 ; Cannot be implemented on C64
 +header ~resizefile, ~resizefile_n, "RESIZE-FILE"
@@ -4250,9 +4412,61 @@ rf_2:
 	+token drop, zero, zero, minusone, exit
 
 +header ~readfile, ~readfile_n, "READ-FILE"
+!if C64 {
 	+forth
 	+literal xreadbyte
 	+token readgen, nip, exit
+} else if F256 {
+rf_stream = _scratch_1
+rf_limit = _scratch_2
+	+code
+	+dpop
+	sta rf_stream
+	+dpop
+	sta rf_limit
+
+	ldy #0
+	ldx #0
+-:
+	cpy rf_limit
+	bne +
+	cpx rf_limit+1
+	beq rf_done
++:	
+	phy
+	phx
+	ldy rl_stream
+	jsr f256readchar
+	plx
+	ply
+	bcs	rf_eos
+	sta (_dtop),y
+	iny
+	bne -
+	inc _dtop+1
+	inx
+	bra -
+
+rf_eos:
+	beq rf_fail		; some chars collected before eos - success
+	
+rf_done:
+	stx _dtop+1
+	sty _dtop
+	lda #255	; success line returns count, true, 0
+-:
+	tax
+	+dpush
+	
+	lda #0
+	tax
+	jmp dpush_and_next
+rf_fail:
+	lda #0		; failed line return 0, false, 0
+	bra -
+} else {
+!error "Not implemented"
+}
 
 ; Not needed on C64
 +header ~flushfile, ~flushfile_n, "FLUSH-FILE"
@@ -5120,7 +5334,14 @@ words_done:
 
 +header ~key, ~key_n, "KEY"
 	+code
+!if C64 {
 	jsr GETIN
+} else if F256 {
+	jsr getch
+} else {
+!error "Not implemented"
+}
+
 	ldx #0
 	jmp dpush_and_next
 
@@ -5129,15 +5350,20 @@ words_done:
 ; code bye
 +header ~bye, ~bye_n, "BYE"
 	+code
-!ifdef CART {
+!if CART {
 ; Just reset the state in cartridge mode
 	jmp coldstart
-} else {
+} else if C64 {
 ; This works fine on Commander X16 as Forth is only using the user area of the zero page. Unfortunately,
 ; there is no such area on C64 - TODO here
 	pla
 	pla
 	rts
+} else if F256 {
+-:
+	bra - ; this is problematic as F256 does not expect PGZ to ever return
+} else {
+!error "Not implemented"
 }
 
 ; Search-Order words
@@ -5242,6 +5468,7 @@ forth_system_c:
 	+literal forth_wordlist_n
 	+literal _vocsref
 	+token poke
+!if C64 {
 ; Check for drive presence and disable I/O if absent
 	+token one
 	+literal 8
@@ -5253,6 +5480,7 @@ forth_system_c:
 	+literal 8
 	+token over, zero, zero, c64open, drop
 ;
+}
 	+literal autorun
 	+token count, included
 	+branch_fwd forth_system_1
@@ -5262,18 +5490,29 @@ forth_system_1:
 	+token interpret
 	+branch forth_system_1
 banner_text:
-	+string "FORTH TX16 1.2"
+	+string "FORTH TX16 1.3"
 autorun:
 	+string "AUTORUN.FTH"
 
 ; ==============================================================================
 
+!if F256 {
+!source "console_F256.asm"
+}
 
-!ifdef CART {
+
+!if CART {
 * = $9fff
 	!byte 0
-} else {
+}
+
 end_of_image:
+
+
+} ; pseudopc
+
+!if F256 {
++STARTUP start_of_image
 }
 
 !symbollist "symbols.txt"
