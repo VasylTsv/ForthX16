@@ -1,4 +1,6 @@
 # ForthX16
+Update 7/21/2025. Rather significant update today which invalidates some instructions below. Until I have time to rewrite it properly, here's the essense of it. Foenix F256 is supported as a target. All targets are build from the common code, so there are Windows commandline build scripts - four to make targets and three to test (there is no obvious way to start Foenix IDE yet). Scripts assume that ACME, VICE, and X16 emulators are present in the same folder. As usual, more size improvements, got close to 200 bytes again. Next - rewrite this page, cleanups, toolkit, Atari. Enjoy!
+
 Forth TX16 or ForthX16 is an enhanced port of my older project [Forth Model T](https://github.com/VasylTsv/ForthModelT) for [Commander X16](https://www.commanderx16.com/). It is a completely functional Forth 2012 core for Commander X16 with most features from Forth Model T included. The only two limitations are related to the limited capabilities of the file system on X16 and to the lack of lowercase in C64/X16 charset (it is more nuanced, but it may not be worth effort supporting it). There are also some minor additions and improvements.
 
 One of the goals of this project is to make the core functional on C64 and small enough to fit into an 8K cartridge. The code is heavily optimized for size, but it may not be the fastest as a result.
