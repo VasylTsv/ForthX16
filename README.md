@@ -1,37 +1,204 @@
 # ForthX16
-**Update 7/21/2025.** Rather significant update today which invalidates some instructions below. Until I have time to rewrite it properly, here's the essense of it. Foenix F256 is supported as a target. All targets are build from the common code, so there are Windows commandline build scripts - four to make targets and three to test (there is no obvious way to start Foenix IDE yet). Scripts assume that ACME, VICE, and X16 emulators are present in the same folder. As usual, more size improvements, got close to 200 bytes again. Next - rewrite this page, cleanups, toolkit, Atari. Enjoy!
+## Intro
+Forth TX16 or ForthX16 is an enhanced port of my older project [Forth Model T](https://github.com/VasylTsv/ForthModelT) for [Commander X16](https://www.commanderx16.com/) and other 6502-based platforms. It is a completely functional Forth 2012 standard implementation. Unlike Forth Model T which used direct threaded model, Forth TX16 is using token threaded model. This was mostly done to minimize the size - one of the goals of the project was to fit the entire interpreter on 8K C64 cartridge.
 
-Forth TX16 or ForthX16 is an enhanced port of my older project [Forth Model T](https://github.com/VasylTsv/ForthModelT) for [Commander X16](https://www.commanderx16.com/). It is a completely functional Forth 2012 core for Commander X16 with most features from Forth Model T included. The only two limitations are related to the limited capabilities of the file system on X16 and to the lack of lowercase in C64/X16 charset (it is more nuanced, but it may not be worth effort supporting it). There are also some minor additions and improvements.
+The other, or rather the main goal of the project was to create an interpreter as compliant to Forth 2012 standard as possible.
+## Supported Platforms
+The original target platform was Commander X16. However, in the middle of developmente I've realized that the same code would run on Commodore 64 with reasonable effort. Thus C64 became a second platform. The third platform is quite different and it was added separately - [Foenix F256](https://c256foenix.com). It is also 6502-based (sort of), but not derived from C64, so console and file I/O are very different. More platforms may be coming.
+## Prerequisites and Building
+The instructions below are for Windows-based systems. It should not be difficult to modify them to other platforms as long as ACME assembler is available there.
+[ACME assembler](https://sourceforge.net/projects/acme-crossass/files/win32/) is used to build the interpreter from the source. It is expected to be places in a subfolder ASM in the project folder.
+Optionally, platform emulators can be used for testing. Scripts assume [VICE](https://vice-emu.sourceforge.io/) for C64 and the [official X16 emulator](https://cx16forum.com/forum/viewtopic.php?t=8443) for Commander X16. These should be placed in subfolders VICE and X16 correspondingly. [Foenix F256 IDE](https://github.com/Trinity-11/FoenixIDE) can be used to test that platform, but there is no special support for it in the scripts. Just install the IDE and point the "SD card" to the location of the binaries.
 
-One of the goals of this project is to make the core functional on C64 and small enough to fit into an 8K cartridge. The code is heavily optimized for size, but it may not be the fastest as a result.
+* `makeprg.bat` will build PRG compatible with both C64 and X16
+* `makecart.bat` will build cartridge image for C64
+* `makediskc64.bat` builds a disk image for C64. It can be used on X16, but there is not much point
+* `makef256.bat` build PGZ executable for F256
 
-The root contains just one assembly file `fthtx16.asm`. It is a proper 6502 assembly in [ACME assembler](https://sourceforge.net/projects/acme-crossass/files/win32/) format. Use the following command line to build the binary:
+* `testcart.bat` will build and load the cartridge in VICE
+* `testdiskc64.bat` tests the disk image in VICE as well
+* `testprg.bat` will build and start PRG file in X16 emulator
+
+There are pre-build binaries in the `binary` folder.
+## The Language Support
+
+This implementation closely follows the Forth 2012 Standard. The following describes the list
+of supported words grouped per the said standard.
+
+### Core words
 ```
-acme --cpu 6502 --outfile fthtx16.prg --format cbm fthtx16.asm
+!			#			#>			#S			'			(			*			*/
+*/MOD		+			+!			+LOOP		,			-			.			."
+/			/MOD		0<			0=			1+			1-			2!			2*
+2/			2@			2DROP		2DUP		2OVER		2SWAP		:			;
+<			<#			=			>			>BODY		>IN			>NUMBER		>R
+?DUP		@			ABORT		ABORT"		ABS			ACCEPT		ALIGN		ALIGNED
+ALLOT		AND			BASE		BEGIN		BL			C!			C,			C@
+CELL+		CELLS		CHAR		CHAR+		CHARS		CONSTANT	COUNT		CR
+CREATE		DECIMAL		DEPTH		DO			DOES>		DROP		DUP			ELSE
+EMIT		ENVIRONMENT? EVALUATE	EXECUTE		EXIT		FILL		FIND		FM/MOD
+HERE		HOLD		I			IF			IMMEDIATE	INVERT		J			KEY
+LEAVE		LITERAL		LOOP		LSHIFT		M*			MAX			MIN			MOD
+MOVE		NEGATE		OR			OVER		POSTPONE	QUIT		R>			R@
+RECURSE		REPEAT		ROT			RSHIFT		S"			S>D			SIGN		SM/REM
+SOURCE		SPACE		SPACES		STATE		SWAP		THEN		TYPE		U.
+U<			UM*			UM/MOD		UNLOOP		UNTIL		VARIABLE	WHILE		WORD
+XOR			[			[']			[CHAR]		]
 ```
-The resulting PRG file can be copied to Commander X16 file system (or C64) and loaded as usual. It is thoroughly tested with the emulator, but I don't have access to the actual hardware yet, so let me know if it breaks on metal.
+### Core Extension words
+```
+.(			.R			0<>			0>			2>R			2R>			2R@			:NONAME
+<>			?DO			ACTION-OF	AGAIN		BUFFER:		C"			CASE		COMPILE,
+DEFER		DEFER!		DEFER@		ENDCASE		ENDOF		ERASE		FALSE		HEX
+HOLDS		IS			MARKER		NIP			OF			PAD			PARSE		PARSE-NAME
+PICK		REFILL		RESTORE-INPUT ROLL		S\"			SAVE-INPUT	SOURCE-ID	TO
+TRUE		TUCK		U.R			U>			UNUSED		VALUE		WITHIN		[COMPILE]
+\
+```
+All of Core and Core Extension words are supported and perform very close to the Standard.
+Note that the cell size for CELL+ and CELLS is 2 bytes as the system is inherently 16-bit.
+However, compilation tokens may be just one byte in size. This does not contradict the standard.
+The word ENVIRONMENT? is recognized but does nothing. It is rarely used and defined in a very
+strange way largely inconsistent with the rest of the language.
 
-A prebuilt binary can be found in `binary` folder.
+There are a few non-standard words supported by this implementation:
+0			-1			1			2			PLACE		+PLACE		?COMP		?DEFER		?STACK	UD/MOD
 
-A modified copy of dynamic memory support package can be found in `dynamic`.
+Block words are not supported and not planned
+This set makes more sense for embedded systems without existing filesystems, so not very useful
+for this implementation.
+
+### Double-Number words
+```
+2CONSTANT	2LITERAL	2VARIABLE	D+			D-			D.			D.R			D0<
+D0=			D2*			D2/			D<			D=			D>S			DABS		DMAX
+DMIN		DNEGATE		M*/			M+
+```
+### Double-Number extension words
+```
+2ROT		2VALUE		DU<
+```
+All Double-Number and Extension words are completely supported and compliant.
+
+### Exception words are not supported and not planned
+This set is optional, but the implementation may be too heavy for 16-bit core.
+
+### Facility words - none supported
+
+### Facility extension words - partial support
+```
++FIELD   BEGIN-STRUCTURE   CFIELD:   END-STRUCTURE   FIELD:
+```
+Only a small group of Facility words is supported, but those are compliant with the standard.
+The rest of the group is considered for possible extension in the future. Most of those words
+are quite simple but they would take too much RAM just for names.
+
+### File-Access words
+```
+( (extended) BIN		CLOSE-FILE	CREATE-FILE	DELETE-FILE	FILE-POSITION FILE-SIZE	INCLUDE-FILE
+INCLUDED	OPEN-FILE	R/O			R/W			READ-FILE	READ-LINE	REPOSITION-FILE RESIZE-FILE
+S" (extended) SOURCE-ID	W/O			WRITE-FILE	WRITE-LINE
+```
+### File-Access extension words
+```
+FILE-STATUS	FLUSH-FILE	INCLUDE		REFILL (extended) RENAME-FILE	REQUIRE		REQUIRED S\" (extended)
+```
+### Floating-Point words are not supported and not planned
+
+### Local words are not supported and not planned
+
+### Memory-Allocation supported as an extension
+
+Include DYNAMIC.FS and initialize that library for complete support.
+
+### Programming-Tools
+```
+.S   ?   WORDS
+```
+### Programming-Tools extension
+```
+BYE   FORGET
+```
+The following are not supported:
+```
+DUMP		SEE
+
+;CODE		AHEAD		ASSEMBLER	CODE		CS-PICK		CS-ROLL		EDITOR		N>R
+NAME>COMPILE NAME>INTERPRET	NAME>STRING NR>		STATE (extended)		SYNONYM		TRAVERSE-WORDLIST
+[DEFINED]	[ELSE]		[IF]		[THEN]		[UNDEFINED]
+```
+Some of these are planned for extensions.
+
+### Search-Order
+```
+DEFINITIONS FIND (extended) FORTH-WORDLIST GET-CURRENT GET-ORDER SEARCH-WORDLIST SET-CURRENT
+SET-ORDER WORDLIST
+```
+### Search-Order extension
+```
+ALSO   FORTH   ONLY   ORDER   PREVIOUS
+```
+All Search-Order and Extension words are completely supported.
+
+### String
+```
+/STRING		BLANK		CMOVE		CMOVE>		COMPARE		SLITERAL
+```
+Most words with exception for -TRAILING and SEARCH are supported. None of the three extension words
+(REPLACES SUBSTITUTE UNESCAPE) are supported at this time. Support through extension is considered.
+
+### Extended-Character words are not supported and not planned
+
+
+## Platform-Specific Notes
+
+### Commodore 64
+* KEY echoes the input character
+* BYE reboots the interpreter in cartridge mode and does nothing in PRG.
+* R/W mode is not supported, the word will do the same as W/O.
+* FILE-POSITION FILE-SIZE	REPOSITION-FILE RESIZE-FILE are not functional and will just fail.
+* Opening file for write does not overwrite an existing file. This is a default system behavior but it feels quite wrong.
+* C64 file handling makes it very hard to distinguish 0-byte file from a non-existing one. INCLUDE will just fail on empty files.
+
+### Commander X16
+All Commodore 64 notes apply except for BYE which properly returns to Basic.
+
+### Foenix F256
+* BYE hangs the interpreter.
+* R/W mode is not supported, the word will do the same as W/O.
+* FILE-POSITION FILE-SIZE REPOSITION-FILE RESIZE-FILE are not functional and will just fail.
+
+## Other Notes
+
+A modified copy of dynamic memory support package can be found in `dynamic`. This brings in standard Memory-Allocation set. The modification was needed to fix a non-compliant issue - allocations of negative size were not properly rejected.
 
 A modified copy of Forth test suite is in `tests` - copy files from there to the file system of Commander X16 and start it with `INCLUDE RUNTESTS.FTH`. The current version should run all tests without errors. The runtime on the emulator is about 4 minutes on Commander X16 (and a LOT more on C64).
 
+A practically stock copy of Forth test suite is in `tests-F256` as that platform uses ASCII and does not need character hacks.
+
 A few examples and benchmarks are in `other` - `BENCH.FTH` and `ERASTO.FTH` are old benchmarking programs calculating primes, practically unchanged (`BENCH` had a few `ENDIF`s replaced by `THEN`s). `RC4TEST.FTH` is a sample from the [Wikipedia](https://en.wikipedia.org/wiki/Forth_(programming_language)) page, unmodified.
 
-Current version finally allows building 8K C64 cartridge. This has not been tested on the real hardware, but works fine in VICE and passes all tests. To build a cartridge, use command lines (cartconv is included with VICE):
-```
-acme --cpu 6502  --outfile fthtx16.rom --format plain buildcrt.asm
-cartconv -t normal -n "Forth TX16" -i fthtx16.rom -o fthtx16.crt
-```
-Both cartridge file and the intermediate ROM image can be found in `binary` folder. There is also a D64 image `tests.d64` there which contains the test suite and the same PRG file - it is possible to run the interpreter from that image or use the image to run the test suite against the cartridge version.
+## Roadmap
 
-There are a few known issues with the current release.
-* Opening a file for write does not overwrite an existing file. This is actually the default system behavior, but it feels quite wrong now.
-* A few file system words cannot be implemented on C64/X16 using the existing Kernal facilities - mainly those related to the file position and advanced access modes.
-* C64 file handling has a logical bug making it very hard to handle 0-byte files properly. INCLUDE will fail on such files.
-* Unlike X16, C64 does not have a large user area on the zero page. This results in Basic being broken by Forth, so BYE does not work properly
+I don't have any particular time estimates, but I do have some plans. The following items can be
+considered my roadmap for the project.
 
-This is work in progress. I am planning to do a few rounds of updates. First of all, the Model T was done in a few evenings, there are a number of cut corners and rather questionable implementations there, some cleanups needed. There are known issues that need to be addressed (above). Need to write a better documentation as well instead of these quick notes.
+### Cleanups
+The project was originally based on the source code written in one weekend so it was already quite messy.
+Multiple optimization passes may have improved the size, but did not make it cleaner. The latest addition
+of F256 target was a bit rushed as well. As a result, the code is not in the best shape, needs some
+cleaning and documenting. Mind you, it is practically impossbile to make a largish 6502 assembly project
+to look clean, there are always some tricks there that would look questionable. So, the best effort here.
 
-The other plans include porting this to Atari computers - that would only require a limited number of changes around the file system handling and other I/O.
+### Optimization in F256 specific section
+F256 has a large block of platform specific code for console and file I/O. The file I/O may be more or
+less straightforward, but console I/O may still shed some bytes.
+
+### Atari 8-bit target
+My first computer was Atari 65XE, so it is only right to support that. Now that I have support for two
+very different platforms the actual platform dependencies are easy to identify and port.
+
+### Toolkits
+These are required for any usable Forth system. I am already looking into inline assembler. Editor is
+a reasonable thing to have. Some parts of the Standard may be added through a toolkit expansion.
+Finally, there are also a lot of platform-specific things that would make the system a lot more usable.
