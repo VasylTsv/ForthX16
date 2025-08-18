@@ -62,7 +62,7 @@ The word ENVIRONMENT? is recognized but does nothing. It is rarely used and defi
 strange way largely inconsistent with the rest of the language.
 
 There are a few non-standard words supported by this implementation:
-* `0` `-1` `1` `2` - self-explanatory			PLACE		+PLACE		?COMP		?DEFER		?STACK	UD/MOD
+* `0` `-1` `1` `2` - self-explanatory
 * `PLACE` and `+PLACE` - these are two very useful string manipulation words from [a Standard proposal](https://forth-standard.org/proposals/place-place)
 * `?COMP` - check if current mode is compilation, abort otherwise
 * `?STACK` - check the data stack for overflow/underflow
