@@ -66,7 +66,7 @@ There are a few non-standard words supported by this implementation:
 * `PLACE` and `+PLACE` - these are two very useful string manipulation words from [a Standard proposal](https://forth-standard.org/proposals/place-place)
 * `?COMP` - check if current mode is compilation, abort otherwise
 * `?STACK` - check the data stack for overflow/underflow
-* `UD/MOD ( ud1 u1 -- u2 u3 )` - commonly used word to divide unsigned double `ud1` by unsigned `u1`. 'u2' is remainder and 'u3' is quotient.
+* `UD/MOD ( ud1 u1 -- u2 ud2 )` - commonly used word to divide unsigned double `ud1` by unsigned `u1`. 'u2' is remainder and 'ud2' is quotient. Notice that unlike `UM/MOD`, the quotient is a double.
 
 ### Block words
 Not supported and not planned. This set makes more sense for embedded systems without existing filesystems, so not very useful
