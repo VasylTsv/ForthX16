@@ -62,10 +62,14 @@ The word ENVIRONMENT? is recognized but does nothing. It is rarely used and defi
 strange way largely inconsistent with the rest of the language.
 
 There are a few non-standard words supported by this implementation:
-0			-1			1			2			PLACE		+PLACE		?COMP		?DEFER		?STACK	UD/MOD
+* `0` `-1` `1` `2` - self-explanatory			PLACE		+PLACE		?COMP		?DEFER		?STACK	UD/MOD
+* `PLACE` and `+PLACE` - these are two very useful string manipulation words from [a Standard proposal](https://forth-standard.org/proposals/place-place)
+* `?COMP` - check if current mode is compilation, abort otherwise
+* `?STACK` - check the data stack for overflow/underflow
+* `UD/MOD ( ud1 u1 -- u2 u3 )` - commonly used word to divide unsigned double `ud1` by unsigned `u1`. 'u2' is remainder and 'u3' is quotient.
 
-Block words are not supported and not planned
-This set makes more sense for embedded systems without existing filesystems, so not very useful
+### Block words
+Not supported and not planned. This set makes more sense for embedded systems without existing filesystems, so not very useful
 for this implementation.
 
 ### Double-Number words
@@ -80,12 +84,14 @@ DMIN		DNEGATE		M*/			M+
 ```
 All Double-Number and Extension words are completely supported and compliant.
 
-### Exception words are not supported and not planned
-This set is optional, but the implementation may be too heavy for 16-bit core.
+### Exception words
+Not supported and not planned. This set is optional, but the implementation may be too heavy for 16-bit core.
 
-### Facility words - none supported
+### Facility words
+No words from the main Facility set are currently supported.
 
-### Facility extension words - partial support
+### Facility extension words
+Partial support.
 ```
 +FIELD   BEGIN-STRUCTURE   CFIELD:   END-STRUCTURE   FIELD:
 ```
@@ -94,6 +100,7 @@ The rest of the group is considered for possible extension in the future. Most o
 are quite simple but they would take too much RAM just for names.
 
 ### File-Access words
+All File-Access words are supported, but not all of them work completely or at all on some platforms. Check platform-specific notes for details
 ```
 ( (extended) BIN		CLOSE-FILE	CREATE-FILE	DELETE-FILE	FILE-POSITION FILE-SIZE	INCLUDE-FILE
 INCLUDED	OPEN-FILE	R/O			R/W			READ-FILE	READ-LINE	REPOSITION-FILE RESIZE-FILE
@@ -103,19 +110,21 @@ S" (extended) SOURCE-ID	W/O			WRITE-FILE	WRITE-LINE
 ```
 FILE-STATUS	FLUSH-FILE	INCLUDE		REFILL (extended) RENAME-FILE	REQUIRE		REQUIRED S\" (extended)
 ```
-### Floating-Point words are not supported and not planned
+### Floating-Point words
+Not supported and not planned.
 
-### Local words are not supported and not planned
+### Local words
+Not supported and not planned. I find this set a very questionable addition to the standard.
 
-### Memory-Allocation supported as an extension
-
-Include DYNAMIC.FS and initialize that library for complete support.
+### Memory-Allocation
+Supported as an extension. Include DYNAMIC.FS and initialize that library for complete support.
 
 ### Programming-Tools
 ```
 .S   ?   WORDS
 ```
 ### Programming-Tools extension
+Small subset is supported.
 ```
 BYE   FORGET
 ```
@@ -130,6 +139,7 @@ NAME>COMPILE NAME>INTERPRET	NAME>STRING NR>		STATE (extended)		SYNONYM		TRAVERSE
 Some of these are planned for extensions.
 
 ### Search-Order
+All Search-Order and Extension words are completely supported.
 ```
 DEFINITIONS FIND (extended) FORTH-WORDLIST GET-CURRENT GET-ORDER SEARCH-WORDLIST SET-CURRENT
 SET-ORDER WORDLIST
@@ -138,17 +148,14 @@ SET-ORDER WORDLIST
 ```
 ALSO   FORTH   ONLY   ORDER   PREVIOUS
 ```
-All Search-Order and Extension words are completely supported.
-
 ### String
 ```
 /STRING		BLANK		CMOVE		CMOVE>		COMPARE		SLITERAL
 ```
-Most words with exception for -TRAILING and SEARCH are supported. None of the three extension words
-(REPLACES SUBSTITUTE UNESCAPE) are supported at this time. Support through extension is considered.
-
-### Extended-Character words are not supported and not planned
-
+Most words with exception for `-TRAILING` and `SEARCH` are supported. None of the three extension words
+(`REPLACES` `SUBSTITUTE` `UNESCAPE`) are supported at this time. Support through extension is considered.
+### Extended-Character words
+Not supported and not planned.
 
 ## Platform-Specific Notes
 
