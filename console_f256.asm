@@ -1,3 +1,5 @@
+console_module_start = *
+
 !zone console
 
 mmu_ctrl = $00
@@ -16,10 +18,6 @@ SCREEN_SIZE_Y = 60
 ; - by cls and scroll_line
 +zpword ~scroll_src
 +zpword ~scroll_dest
-; - by puts/putc
-+zpword ~char_src
-+zpword ~char_dest
-+zpbyte ~char_count
 ; - by gets
 +zpword ~gets_buffer
 +zpbyte ~gets_limit
@@ -158,71 +156,34 @@ scroll_line:
 	rts
 
 ;==============================================================================
-; puts - prints a string of specifie length using current text colors
-; X:A - address of the string, Y - string length
-; Note that this code is optimized for string output vs the single character
-; output. Not sure if it is the best approach yet. It may also be a slightly
-; larger because of that.
+; putc - output one character in A
 
-!zone puts
-puts:
-	cpy #0
-	beq .done
-	sta char_src
-	stx char_src+1
-	sty char_count
-	clc
-	lda text_coord
-	sta char_dest
-	adc char_count
-	sta text_coord
-	lda text_coord+1
-	sta char_dest+1
-	adc #0
-	sta text_coord+1
-
--:
+!zone putc
+putc:
+	pha
 ; compare text_coord against the end of the screen
 	lda text_coord+1
 	cmp #>($c000+SCREEN_SIZE_X*SCREEN_SIZE_Y)
-	bcc .proceed
-	bne +
+	bne .proceed
 	lda text_coord
 	cmp #<($c000+SCREEN_SIZE_X*SCREEN_SIZE_Y)
-	bcc .proceed
-+:
-	sec
-	lda char_dest
-	sbc #SCREEN_SIZE_X
-	sta char_dest
-	bcs +
-	dec char_dest+1
-+:
+	bne .proceed
 	jsr scroll_line
-	bra -
 
-.proceed:
-	ldy char_count
-	
-	dey
-	phy
+.proceed
 	lda #3
 	sta io_ctrl
 	lda text_attrib
--:
-	sta (char_dest),y
-	dey
-	bpl -
-	ply
+	sta (text_coord)
 	lda #2
 	sta io_ctrl
--:
-	lda (char_src),y
-	sta (char_dest),y
-	dey
-	bpl -
-
-.done:
+	pla
+	sta (text_coord)
+	
+	inc text_coord
+	bne +
+	inc text_coord+1
++:
 	rts
 
 ;==============================================================================
@@ -418,14 +379,5 @@ gets:
 	rts
 
 ;==============================================================================
-; putc - output one character in A
 
-!zone putc
-putc:
-	sta gets_tmp
-	lda #<gets_tmp
-	ldx #>gets_tmp
-	ldy #1
-	jmp puts
-
-;==============================================================================
+; !warn "console_f256 module compiled to ", *-console_module_start, " bytes"

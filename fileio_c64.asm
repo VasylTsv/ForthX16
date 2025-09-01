@@ -1,3 +1,5 @@
+fileio_module_start = *
+
 ; Full equivalent to C64 OPEN, not exposed to dictionary yet
 ; Note that it requires 5 stack parameters as the string is enchoded as (c_addr,u)
 ; Top of data stack will have filenum or 0 on error
@@ -182,3 +184,4 @@ close_open_files:
 	+stax _openfiles
 	rts
 
+; !warn "fileio_c64 module compiled to ", *-fileio_module_start, " bytes"

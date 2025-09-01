@@ -38,6 +38,12 @@
 ;	C64 PETSCII charset does not have backslash. Pound symbol is used instead
 ;	It does not have tilde either. Not used in standard words, but it is used in test suite
 
+; ACME assembler does not have facilities to convert between int and string, unless I've missed something...
+VERSION_HIGH = "1"
+VERSION_HIGH_INT = 1
+VERSION_LOW = "4"
+VERSION_LOW_INT = 4
+
 ; ACME does not assume non-existing symbols to resolve to 0, forcing it here
 !ifndef C64 {
 C64 = 0
@@ -49,6 +55,13 @@ CART = 0
 F256 = 0
 }
 
+; Validate platform defines so they don't need to be validated every time
+!if C64 = 0 and F256 = 0 {
+!error "Undefined platform"
+}
+!if CART != 0 and C64 = 0 {
+!error "Invalid cartridge target"
+}
 
 !if C64 {
 ; KERNAL entries
@@ -64,13 +77,14 @@ CHROUT = $FFD2
 GETIN = $FFE4
 READST = $FFB7
 STOP = $FFE1
+
+!if CART {
 ; Only used in cartridge build
 IOINIT = $ff84
 RAMTAS = $ff87
 RESTOR = $ff8a
 SCINIT = $ff81
 
-!if CART {
 * = $8000
 start_of_image:
 	!word coldstart
@@ -103,8 +117,6 @@ CODESTART = *
 +SEGMENT start_of_image, end_of_image
 
 CODESTART = $200
-} else {
-!error "Not implemented"
 }
 
 !convtab raw
@@ -244,14 +256,16 @@ NEW_LINE = $0D
 	!set __hm_addr = .name
 }
 
-!if CART {
-+high_memory_begin $8000
-} else if C64 {
-+high_memory_begin $a000
+!if C64 {
+	!if CART {
+		+high_memory_begin $8000
+	} else {
+		+high_memory_begin $a000
+	}
 } else if F256 {
-+high_memory_begin $c000
+	+high_memory_begin $c000
 } else {
-!error "Not implemented"
+	!error "Not implemented"
 }
 
 +hmbuffer ~TOKENS, 2*TOKEN_COUNT	; token lookup table (XT->CFA)
@@ -348,6 +362,14 @@ STACKLIMIT = DSIZE - 4*SSAFE
 	dec .addr+1
 +	dec .addr
 	pla
+}
+
+!macro bra .addr {
+	!if F256 {
+		bra .addr
+	} else {
+		jmp .addr
+	}
 }
 
 ; Stack access is behind macros so it is easier to change in the future
@@ -574,13 +596,14 @@ STACKLIMIT = DSIZE - 4*SSAFE
 	ldx #>forth_system_n
 	+stax _latest
 	
-!if CART {
+!if C64 and CART {
 	lda #<$0801
 	ldx #>$0801
 } else {
 	lda #<end_of_image
 	ldx #>end_of_image
 }
+
 	+stax _here
 
 ; In token threaded code we need to generate the mapping of tokens to addresses
@@ -704,7 +727,7 @@ call:
 	lda event_buffer+off_event_key_ascii
 	cmp #3
 } else {
-!error "Not implemented"
+	!error "Not implemented"
 }
 
 	bne +
@@ -716,7 +739,7 @@ call:
 	+ldax _w
 	+incax 1
 	+stax _ri
-	jmp next
+	+bra next
 
 ; EXIT - return from the current word to the caller (called "return" here to avoid conflict with EXIT word)
 ;	RI = rpop()
@@ -725,7 +748,7 @@ call:
 return:
 	+rpop
 	+stax _ri
-	jmp next
+	+bra next
 
 ; INVOKE - this will execute word by CFA and continue to the next word (exposed to the language as EXECUTE)
 ;	W = pop()
@@ -776,7 +799,7 @@ does:
 	adc #0
 	sta _ri+1
 	
-	jmp created	; starting with PUSH(W+2) it is the same
+	+bra created	; starting with PUSH(W+2) it is the same
 
 ; DODEFER - semantics of the word created by DEFER
 ;	W = mem(W+3)	; offset for jmp dodefer
@@ -788,7 +811,7 @@ dodefer:
 	tax
 	dey
 	lda (_w),y
-	jmp invokeax
+	+bra invokeax
 
 ; DOVALUE - semantics of a VALUE
 ;	Assumes a very particular structure: pointer to semantics block followed by value bytes. Semantics block contains
@@ -815,7 +838,7 @@ dovalue:
 	dey
 	lda (_rscratch),y
 	
-	jmp invokeax
+	+bra invokeax
 
 ; A number of Forth words have constant semantics. Typical systems define CONSTANT using DOES> but that wastes a few
 ; bytes for the call. Using a separate semantic word instead.
@@ -953,7 +976,7 @@ bsmodlow:			; Move LOW to be one word above MID
 	lda bsmid+1
 	adc #0
 	sta bslow+1
-	jmp bsloop
+	+bra bsloop
 bschklsb:			; MSB is matching. Check LSB and adjust HIGH or LOW depending on the value
 	lda bsvalue
 	dey
@@ -967,7 +990,7 @@ bsmodhigh:			; Move HIGH to be one word below MID
 	lda bsmid+1
 	sbc #0
 	sta bshigh+1
-	jmp bsloop
+	+bra bsloop
 bsdone:
 	rts
 
@@ -1038,7 +1061,7 @@ gtt_offsetok:
 ;	lda _rscratch+1
 ;	sbc _wscratch+1
 ;	sta _rscratch+1
-	jmp gtt_next
+	+bra gtt_next
 
 gtt_done:
 
@@ -1223,7 +1246,7 @@ cfatoxt_found:		; Unless the system is broken, something has to be found and C i
 ; code exit
 ; code execute
 ; : quit (sst) ;code
-; : abort begin depth 0> while drop again begin depth <0 while 0 again quit ;
+; code abort
 ;
 
 ; EXIT is used to return from any word.
@@ -1234,13 +1257,11 @@ cfatoxt_found:		; Unless the system is broken, something has to be found and C i
 +header ~execute, ~execute_n, "EXECUTE"
 	+code invoke
 
-; TODO: should also call (SST) in QUIT
 ; Reset data stack and perform QUIT.
 +header ~abort, ~abort_n, "ABORT"
 	+code
 abort_c:
 	jsr init_dstack
-	jsr close_open_files
 	jmp quit_c
 
 ; Somehow this ended being a common byte sequence (8 instances), so we can save a few bytes here
@@ -1399,9 +1420,6 @@ negate_c:
 
 +header ~twoplus, ~twoplus_n, "2+"
 	+code
-;	+ldax _dtop
-;	+incax 2
-;	+stax _dtop
 	+incmem _dtop, 2
 	jmp next
 
@@ -1573,7 +1591,7 @@ ummod_2:
 	bne ummod_1
 	inc _slow+1
 ummod_3:
-	jmp ummod_1
+	+bra ummod_1
 ummod_x:
 	+ldax _shigh
 	+stax _dtop
@@ -1632,7 +1650,7 @@ ummult_1:
 	lda _shigh+1
 	adc _smult+1
 	sta _shigh+1
-	jmp ummult_1
+	+bra ummult_1
 ummult_x:
 	+ldax _slow
 	+stax _dtop
@@ -1754,24 +1772,26 @@ mmult_1:
 
 +header ~zeroeq, ~zeroeq_n, "0="
 	+code
-	ldx #255
 	lda _dtop
 	ora _dtop+1
-	beq +
-	ldx #0
-	beq +		; Note: cross-word jump, guaranteed to occur here
+	beq true_and_next
+	bne false_and_next
 
 +header ~zerolt, ~zerolt_n, "0<"
 	+code
-	ldx #255
 	lda _dtop+1
-	bmi +
-	ldx #0
-+:
-	stx _dtop
-	stx _dtop+1
-	jmp next
+;	bmi true_and_next 	; fallthrough to the fragment, saving 2 bytes
+	bpl false_and_next
 
+true_and_next:
+	lda #255
+	bne +
+false_and_next:
+	lda #0
++:
+	sta _dtop
+	sta _dtop+1
+	jmp next
 ;
 ;	: 0> 0 swap < ;
 ;	: 0<> 0= 0= ;
@@ -1812,21 +1832,13 @@ mmult_1:
 	lda _dtop+1
 	eor #$80
 	cmp _scratch+1
-	bcc less_true
-	bne less_false
+	bcc true_and_next
+	bne false_and_next
 	lda _dtop
 	cmp _scratch
 less_result:
-	bcc less_true
-less_false:
-	lda #0
--:
-	tax
-	+stax _dtop
-	jmp next
-less_true:
-	lda #255
-	bne -
+	bcc true_and_next
+	bcs false_and_next
 
 ;
 ;	: > swap < ;
@@ -1848,23 +1860,11 @@ less_true:
 	+stax _scratch
 	lda _dtop+1
 	cmp _scratch+1
-;	bcc uless_t
-;	bne uless_f
-	bcc less_true
-	bne less_false
+	bcc true_and_next
+	bne false_and_next
 	lda _dtop
 	cmp _scratch
-	jmp less_result
-;	bcc uless_t
-;uless_f:
-;	lda #0
-;	jmp uless_1
-;uless_t:
-;	lda #255
-;uless_1:
-;	sta _dtop
-;	sta _dtop+1
-;	jmp next
+	+bra less_result
 
 ;
 ;	: u> swap u< ;
@@ -2195,7 +2195,7 @@ rat_common:
 	dey
 	lda (_rstack),y
 	+dpush
-	jmp rat_common
+	+bra rat_common
 ;	ldy #3
 ;	lda (_rstack),y
 ;	tax
@@ -2596,7 +2596,7 @@ accept_2:
 	stz _dtop+1
 	jsr newline
 } else {
-!error "Not implemented"
+	!error "Not implemented"
 }
 
 	jmp next
@@ -2656,7 +2656,7 @@ prompt:
 +:	
 	jsr putc
 } else {
-!error "Not implemented"
+	!error "Not implemented"
 }
 
 	jmp next
@@ -2949,14 +2949,14 @@ xfind_offsetok:
 ;	sbc _wscratch+1
 ;	sta _rscratch+1
 	
-	jmp xfind_compare
+	+bra xfind_compare
 
 xfind_linkcore:
 	lda #<forth_system_n
 	sta _rscratch
 	lda #>forth_system_n
 	sta _rscratch+1
-	jmp xfind_compare
+	+bra xfind_compare
 
 xfind_nomorewords:
 	sta _dtop
@@ -3371,7 +3371,7 @@ xcreate_4:
 
 qdefer_abort:
 	+token xabortq
-+header ~qdefer, ~qdefer_n, "?DEFER"
++header ~qdefer, ~qdefer_n	; ?DEFER
 	+forth
 	+token dup, tobody, twominus, peek
 	+literal dodefer
@@ -3447,9 +3447,16 @@ compilecomma_1:
 	+token here, swap, commaquote, fresolve, compile, lit, comma
 	+token exit
 
+; In some cases (ABORT?) may be called when the data stack is in bad state. This would fix it
++header ~fixdstack, ~fixdstack_n
+	+code
+	jsr init_dstack
+	jmp next
 
+; Nominally (ABORT?) - will print the string following the word and call ABORT
 +header ~xabortq, ~xabortq_n
 	+forth
+	+token fixdstack
 	+token rat, count
 	+literal NAMEMASK
 	+token and_op, type, abort, exit
@@ -3457,21 +3464,7 @@ compilecomma_1:
 +header ~xquit, ~xquit_n
 	+code
 quit_c:
-!if C64 {
-; TODO - close_open_files seems to be more consistent and safer here
-;	jsr CLRCHN
-;	lda #7			; do not try to open 0-2
-;	sta _openfiles
-;	lda #0
-;	sta _openfiles+1
 	jsr close_open_files
-} else if F256 {
-	jsr close_open_files
-} else {
-!error "Not implemented"
-}
-
-	
 	jsr init_rstack
 	lda #<forth_system_r		; don't show the banner
 	ldx #>forth_system_r
@@ -3777,7 +3770,7 @@ smove_9:
 ;	lda (_rscratch),y
 	jsr smove_hexdigit
 	ora _stemp
-	jmp smove_8
+	+bra smove_8
 smove_10:
 	cmp #'A'
 	bmi smove_11
@@ -3788,7 +3781,7 @@ smove_10:
 	tax
 	lda smove_subst,x
 	ldx _stemp
-	jmp smove_8
+	+bra smove_8
 smove_11:
 	lda (_rscratch),y	; reload to restore case
 smove_8:
@@ -3945,7 +3938,7 @@ ro_v:
 } else if F256 {
 	+value kernel_args_file_open_READ
 } else {
-!error "Not implemented"
+	!error "Not implemented"
 }
 
 +header ~openfile, ~openfile_n, "OPEN-FILE"
@@ -4003,7 +3996,7 @@ of_1:
 	lda #1
 	bra -
 } else {
-!error "Not implemented"
+	!error "Not implemented"
 }
 
 
@@ -4020,7 +4013,7 @@ of_1:
 	stz _dtop
 	jmp next
 } else {
-!error "Not implemented"
+	!error "Not implemented"
 }
 
 
@@ -4051,50 +4044,53 @@ filestatus_1:
 	+literal xreadcharchecked
 	+token readgen, exit
 } else if F256 {
-rl_stream = _scratch_1
-rl_limit = _scratch_1+1
+;rl_stream = _scratch_1
+;rl_limit = _scratch_1+1
 	+code
-	+dpop
-	sta rl_stream
-	+dpop
-	sta rl_limit
-
-	ldy #0
--:
-	cpy rl_limit
-	beq +
-	phy
-	ldy rl_stream
-	jsr f256readchar
-	ply
-	bcs	rl_eos
-	cmp #10
-	beq +
-	cmp #13
-	beq +
-	sta (_dtop),y
-	iny
-	bra -
-
-rl_eos:
-	beq rl_fail		; some chars collected before eos - success
-	
-+:
-	stz _dtop+1
-	sty _dtop
-	lda #255	; success line returns count, true, 0
--:
-	tax
-	+dpush
-	
-	lda #0
-	tax
-	jmp dpush_and_next
-rl_fail:
-	lda #0		; failed line return 0, false, 0
-	bra -
+	lda #255
+	sta _rscratch
+	jmp readfile_common
+;	+dpop
+;	sta rl_stream
+;	+dpop
+;	sta rl_limit
+;
+;	ldy #0
+;-:
+;	cpy rl_limit
+;	beq +
+;	phy
+;	ldy rl_stream
+;	jsr f256readchar
+;	ply
+;	bcs	rl_eos
+;	cmp #10
+;	beq +
+;	cmp #13
+;	beq +
+;	sta (_dtop),y
+;	iny
+;	bra -
+;
+;rl_eos:
+;	beq rl_fail		; some chars collected before eos - success
+;	
+;+:
+;	stz _dtop+1
+;	sty _dtop
+;	lda #255	; success line returns count, true, 0
+;-:
+;	tax
+;	+dpush
+;	
+;	lda #0
+;	tax
+;	jmp dpush_and_next
+;rl_fail:
+;	lda #0		; failed line return 0, false, 0
+;	bra -
 } else {
-!error "Not implemented"
+	!error "Not implemented"
 }
 
 
@@ -4148,15 +4144,15 @@ wf_limit = _scratch_1
 wf_done:
 	lda #0
 -:
-	tax
-	+stax _dtop
+	sta _dtop
+	sta _dtop+1
 	jmp next
 
 wf_error:
 	lda #255
 	bne -
 } else {
-!error "Not implemented"
+	!error "Not implemented"
 }
 
 +header ~writeline, ~writeline_n, "WRITE-LINE"
@@ -4171,7 +4167,7 @@ wf_error:
 	+token exit
 lineend !byte NEW_LINE
 } else {
-!error "Not implemented"
+	!error "Not implemented"
 }
 
 +error_message ~includefile_error
@@ -4265,7 +4261,7 @@ wo_v:
 } else if F256 {
 	+value kernel_args_file_open_WRITE
 } else {
-!error "Not implemented"
+	!error "Not implemented"
 }
 
 ; This may not be supported on C64, making it identical to W/O
@@ -4276,7 +4272,7 @@ wo_v:
 } else if F256 {
 	+value kernel_args_file_open_WRITE
 } else {
-!error "Not implemented"
+	!error "Not implemented"
 }
 
 ; For C64 OPEN-FILE and CREATE-FILE are identical
@@ -4310,30 +4306,36 @@ df_1:
 	+ldax _dtop
 	+stax kernel_args_file_delete_fname
 	jsr kernel_File_Delete
+-:	
+	jsr waitforcompletion
 	bcs df_error
-	
--:
-	jsr kernel_Yield
-	jsr kernel_NextEvent
-	bcs -
-	
-	lda event_buffer+off_event_type
-	cmp #kernel_event_file_ERROR
-	beq df_error
 	cmp #kernel_event_file_DELETED
 	bne -
+df_continue:	; common code for DELETE-FILE and RENAME-FILE
+;	bcs df_error
+;	
+;-:
+;	jsr kernel_Yield
+;	jsr kernel_NextEvent
+;	bcs -
+;	
+;	lda event_buffer+off_event_type
+;	cmp #kernel_event_file_ERROR
+;	beq df_error
+;	cmp #kernel_event_file_DELETED
+;	bne -
 
 	lda #0
 -:
-	tax
-	+stax _dtop
+	sta _dtop
+	sta _dtop+1
 	jmp next
 
 df_error:
 	lda #255
-	bne -
+	bra -
 } else {
-!error "Not implemented"
+	!error "Not implemented"
 }
 
 ; C64 equivalent: PRINT#15,"R0:NewName=OldName"
@@ -4375,30 +4377,36 @@ rf_2:
 	+ldax _dtop
 	+stax kernel_args_file_rename_old
 	jsr kernel_File_Rename
-	bcs rf_error
-	
--:
-	jsr kernel_Yield
-	jsr kernel_NextEvent
-	bcs -
-	
-	lda event_buffer+off_event_type
-	cmp #kernel_event_file_ERROR
-	beq rf_error
+-:	
+	jsr waitforcompletion
+	bcs df_error						; note jump to a different word (common fragment)
 	cmp #kernel_event_file_RENAMED
 	bne -
+	bra df_continue
+;	bcs rf_error
+;	
+;-:
+;	jsr kernel_Yield
+;	jsr kernel_NextEvent
+;	bcs -
+;	
+;	lda event_buffer+off_event_type
+;	cmp #kernel_event_file_ERROR
+;	beq rf_error
+;	cmp #kernel_event_file_RENAMED
+;	bne -
 
-	lda #0
--:
-	tax
-	+stax _dtop
-	jmp next
-
-rf_error:
-	lda #255
-	bne -
+;	lda #0
+;-:
+;	sta _dtop
+;	sta _dtop+1
+;	jmp next
+;
+;rf_error:
+;	lda #255
+;	bne -
 } else {
-!error "Not implemented"
+	!error "Not implemented"
 }
 
 ; Cannot be implemented on C64
@@ -4420,6 +4428,8 @@ rf_error:
 rf_stream = _scratch_1
 rf_limit = _scratch_2
 	+code
+	stz _rscratch
+readfile_common:
 	+dpop
 	sta rf_stream
 	+dpop
@@ -4435,11 +4445,18 @@ rf_limit = _scratch_2
 +:	
 	phy
 	phx
-	ldy rl_stream
+	ldy rf_stream
 	jsr f256readchar
 	plx
 	ply
 	bcs	rf_eos
+	bit _rscratch	; of all things this opcode does we only care about it moving bit 7 to N
+	bpl +			; if N is not set, it's READ-FILE, otherwise must be READ-LINE
+	cmp #10
+	beq rf_done
+	cmp #13
+	beq rf_done
++:	
 	sta (_dtop),y
 	iny
 	bne -
@@ -4465,7 +4482,7 @@ rf_fail:
 	lda #0		; failed line return 0, false, 0
 	bra -
 } else {
-!error "Not implemented"
+	!error "Not implemented"
 }
 
 ; Not needed on C64
@@ -5068,7 +5085,7 @@ compare_next2:
 	dec clen2+1
 compare_next3:
 	dec clen2
-	jmp compare_loop
+	+bra compare_loop
 
 ; ==============================================================================
 ;
@@ -5339,9 +5356,8 @@ words_done:
 } else if F256 {
 	jsr getch
 } else {
-!error "Not implemented"
+	!error "Not implemented"
 }
-
 	ldx #0
 	jmp dpush_and_next
 
@@ -5350,20 +5366,21 @@ words_done:
 ; code bye
 +header ~bye, ~bye_n, "BYE"
 	+code
-!if CART {
-; Just reset the state in cartridge mode
-	jmp coldstart
-} else if C64 {
-; This works fine on Commander X16 as Forth is only using the user area of the zero page. Unfortunately,
-; there is no such area on C64 - TODO here
-	pla
-	pla
-	rts
+!if C64 {
+	!if CART {
+	; Just reset the state in cartridge mode
+		jmp coldstart
+	} else {
+	; This works fine on Commander X16 as Forth is only using the user area of the zero page. Unfortunately,
+	; there is no such area on C64 - TODO here
+		pla
+		pla
+		rts
+	}
 } else if F256 {
--:
-	bra - ; this is problematic as F256 does not expect PGZ to ever return
+	jmp start_of_image
 } else {
-!error "Not implemented"
+	!error "Not implemented"
 }
 
 ; Search-Order words
@@ -5434,6 +5451,22 @@ order_done:
 	+code doconst
 	+value 0
 
++header ~ver, ~ver_n, "VER"
+	+code doconst
+	+value VERSION_HIGH_INT<<8 | VERSION_LOW_INT
+	
+!if C64 {
++header ~c64, ~c64_n, "C64"
+	+forth
+	+token exit
+} else if F256 {
++header ~c64, ~c64_n, "F256"
+	+forth
+	+token exit
+} else {
+	!error "Not implemented"
+}
+	
 ; ==============================================================================
 ; The main system loop. This has to be the last word in the core
 
@@ -5490,7 +5523,7 @@ forth_system_1:
 	+token interpret
 	+branch forth_system_1
 banner_text:
-	+string "FORTH TX16 1.3"
+	+string "FORTH TX16 " + VERSION_HIGH + "." + VERSION_LOW
 autorun:
 	+string "AUTORUN.FTH"
 
@@ -5501,7 +5534,7 @@ autorun:
 }
 
 
-!if CART {
+!if C64 and CART {
 * = $9fff
 	!byte 0
 }

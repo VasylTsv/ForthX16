@@ -1,3 +1,5 @@
+fileio_module_start = *
+
 ; File handle is used as a source id and that is not expected to be 0. However, the stream index is 0 to 7.
 ; To make it easier, open increments the value before returning and all other calls decrement it of use
 ; _streamid-1 to the same effect
@@ -13,6 +15,31 @@ f256buffersinit:
 	stz _drive
 	rts
 
+; Common operations for many kernel calls. Checks for generic error and sets C if any occured.
+; It will wait until an error or an event in _scratch occurs.
+!zone waitforcompletion
+waitforcompletion:
+	bcs error_return
+-:
+	jsr kernel_Yield
+	jsr kernel_NextEvent
+	bcs -
+	lda event_buffer+off_event_type
+	cmp _scratch
+	beq .return
+	cmp #kernel_event_file_ERROR
+	beq error_return
+	cmp #kernel_event_file_EOF
+	beq error_return
+	cmp #kernel_event_file_NOT_FOUND
+	bne -
+error_return:
+	sec
+	rts
+.return:
+	clc
+	rts
+
 ; Open file with name in X:A, length in Y, open mode in _scratch. Return the buffer id in A and status in C
 f256open:
 	+stax kernel_args_file_open_fname
@@ -25,7 +52,7 @@ f256open:
 	cmp #255
 	beq +
 	dey
-	bmi of_error
+	bmi error_return
 	bra -
 	
 +:
@@ -34,21 +61,17 @@ f256open:
 	lda _drive
 	sta kernel_args_file_open_drive
 	sty kernel_args_file_open_cookie
+	lda #kernel_event_file_OPENED
+	sta _scratch
 	jsr kernel_File_Open
-	bcs of_error
+	
+;-:
+	jsr waitforcompletion
+	bcs open_complete
+;	cmp #kernel_event_file_OPENED
+;	bne -
 
--:
-	jsr kernel_Yield
-	jsr kernel_NextEvent
-	bcs -
-	lda event_buffer+off_event_type
-	cmp #kernel_event_file_OPENED
-	beq +
-	cmp #kernel_event_file_NOT_FOUND
-	beq of_error
-	cmp #kernel_event_file_ERROR
-	bne -
-+:
+
 	ldy kernel_args_file_open_cookie
 	lda #1				; this will appear as a valid stream at exhausted state, triggers a refill on the first read
 	sta _streamptr,y
@@ -57,11 +80,9 @@ f256open:
 	sta _streamid,y
 	iny
 	tya
-	clc
-	rts
+;	clc		; not needed as no instructions since waitforcompletion can change C
 
-of_error:
-	sec
+open_complete:
 	rts
 
 
@@ -73,13 +94,14 @@ f256close:
 	phy
 	sta kernel_args_file_close_stream
 	jsr kernel_File_Close
+	; TODO - do we need to bother checking for CLOSED?
 	ply
 	lda #255
 	sta _streamid-1,y
 +:
 	rts
 
-
+; Make sure all files are closed
 close_open_files:
 	ldy #7
 -:
@@ -88,7 +110,6 @@ close_open_files:
 	bpl -
 	stz _drive
 	rts
-
 
 ; Refill input stream buffer. Buffer index in Y. Return the status in C
 f256refill:
@@ -103,20 +124,14 @@ f256refill:
 	sta kernel_args_file_read_stream
 	lda #64
 	sta kernel_args_file_read_buflen
+	lda #kernel_event_file_DATA
+	sta _scratch
 	jsr kernel_File_Read
-	bcs refill_error
--:
-	jsr kernel_Yield
-	jsr kernel_NextEvent
-	bcs -
-	
-	lda event_buffer+off_event_type
-	cmp #kernel_event_file_ERROR
-	beq refill_error
-	cmp #kernel_event_file_EOF
-	beq refill_error
-	cmp #kernel_event_file_DATA
-	bne -
+;-:	
+	jsr waitforcompletion
+	bcs refill_complete
+;	cmp #kernel_event_file_DATA
+;	bne -
 
 	lda event_buffer+off_event_file_data_read
 	sta kernel_args_recv_buflen
@@ -144,11 +159,10 @@ f256refill:
 	clc
 	rts
 	
-refill_error:
+refill_complete:	
 	ply
-	sec
 	rts
-
+	
 ; Read one byte (character) from the stream. Buffer ID in Y, returns the char in A, status in C
 rc_scratch = _scratch
 f256readchar:
@@ -201,22 +215,15 @@ f256write:
 	ldy _scratch
 	lda _streamid-1,y
 	sta kernel_args_file_write_stream
-jsr putc
+	lda #kernel_event_file_WROTE
+	sta _scratch
 	jsr kernel_File_Write
-	bcc fw_error
--:
-	jsr kernel_Yield
-	jsr kernel_NextEvent
-	bcs -
-	
-	lda event_buffer+off_event_type
-	cmp #kernel_event_file_ERROR
-	beq fw_error
-	cmp #kernel_event_file_WROTE
-	bne -
-	clc
+;-:	
+	jsr waitforcompletion
+;	bcs fw_complete
+;	cmp #kernel_event_file_WROTE
+;	bne -
+;fw_complete:	; note that C flag is in the exact state we need here
 	rts
 	
-fw_error:
-	sec
-	rts
+; !warn "fileio_f256 module compiled to ", *-fileio_module_start, " bytes"
