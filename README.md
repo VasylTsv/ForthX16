@@ -67,6 +67,8 @@ There are a few non-standard words supported by this implementation:
 * `?COMP` - check if current mode is compilation, abort otherwise
 * `?STACK` - check the data stack for overflow/underflow
 * `UD/MOD ( ud1 u1 -- u2 ud2 )` - commonly used word to divide unsigned double `ud1` by unsigned `u1`. 'u2' is remainder and 'ud2' is quotient. Notice that unlike `UM/MOD`, the quotient is a double.
+* `VER ( -- d )` - returns the interpreter version number. For 1.4 it will return 0x0104
+* `C64` or `F256` (only one present) - platform indentifying words to support platform-specific code
 
 ### Block words
 Not supported and not planned. This set makes more sense for embedded systems without existing filesystems, so not very useful
@@ -161,7 +163,7 @@ Not supported and not planned.
 
 ### Commodore 64
 * KEY echoes the input character
-* BYE reboots the interpreter in cartridge mode and does nothing in PRG.
+* BYE reboots the interpreter in cartridge mode and attempts to return to Basic in PRG (that is not working properly yet).
 * R/W mode is not supported, the word will do the same as W/O.
 * FILE-POSITION FILE-SIZE	REPOSITION-FILE RESIZE-FILE are not functional and will just fail.
 * Opening file for write does not overwrite an existing file. This is a default system behavior but it feels quite wrong.
@@ -171,7 +173,7 @@ Not supported and not planned.
 All Commodore 64 notes apply except for BYE which properly returns to Basic.
 
 ### Foenix F256
-* BYE hangs the interpreter.
+* BYE will restart the interpreter.
 * R/W mode is not supported, the word will do the same as W/O.
 * FILE-POSITION FILE-SIZE REPOSITION-FILE RESIZE-FILE are not functional and will just fail.
 
@@ -179,11 +181,17 @@ All Commodore 64 notes apply except for BYE which properly returns to Basic.
 
 A modified copy of dynamic memory support package can be found in `dynamic`. This brings in standard Memory-Allocation set. The modification was needed to fix a non-compliant issue - allocations of negative size were not properly rejected.
 
+The interpreter will look for file `AUTORUN.FTH` and execute it if found.
+
 A modified copy of Forth test suite is in `tests` - copy files from there to the file system of Commander X16 and start it with `INCLUDE RUNTESTS.FTH`. The current version should run all tests without errors. The runtime on the emulator is about 4 minutes on Commander X16 (and a LOT more on C64).
 
 A practically stock copy of Forth test suite is in `tests-F256` as that platform uses ASCII and does not need character hacks.
 
 A few examples and benchmarks are in `other` - `BENCH.FTH` and `ERASTO.FTH` are old benchmarking programs calculating primes, practically unchanged (`BENCH` had a few `ENDIF`s replaced by `THEN`s). `RC4TEST.FTH` is a sample from the [Wikipedia](https://en.wikipedia.org/wiki/Forth_(programming_language)) page, unmodified.
+
+## Known Issues
+
+The error recovery has a bug that causes to lock the interpreter in some cases. The cause is not clear yet and the issue seems to be random.
 
 ## Roadmap
 
