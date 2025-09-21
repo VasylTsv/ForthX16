@@ -65,12 +65,8 @@ f256open:
 	sta _scratch
 	jsr kernel_File_Open
 	
-;-:
 	jsr waitforcompletion
 	bcs open_complete
-;	cmp #kernel_event_file_OPENED
-;	bne -
-
 
 	ldy kernel_args_file_open_cookie
 	lda #1				; this will appear as a valid stream at exhausted state, triggers a refill on the first read
@@ -94,7 +90,7 @@ f256close:
 	phy
 	sta kernel_args_file_close_stream
 	jsr kernel_File_Close
-	; TODO - do we need to bother checking for CLOSED?
+	; According to the docs, no need to check for CLOSED
 	ply
 	lda #255
 	sta _streamid-1,y
@@ -103,11 +99,11 @@ f256close:
 
 ; Make sure all files are closed
 close_open_files:
-	ldy #7
+	ldy #8
 -:
 	jsr f256close
 	dey
-	bpl -
+	bne -
 	stz _drive
 	rts
 
@@ -127,11 +123,9 @@ f256refill:
 	lda #kernel_event_file_DATA
 	sta _scratch
 	jsr kernel_File_Read
-;-:	
+
 	jsr waitforcompletion
 	bcs refill_complete
-;	cmp #kernel_event_file_DATA
-;	bne -
 
 	lda event_buffer+off_event_file_data_read
 	sta kernel_args_recv_buflen
@@ -218,12 +212,7 @@ f256write:
 	lda #kernel_event_file_WROTE
 	sta _scratch
 	jsr kernel_File_Write
-;-:	
-	jsr waitforcompletion
-;	bcs fw_complete
-;	cmp #kernel_event_file_WROTE
-;	bne -
-;fw_complete:	; note that C flag is in the exact state we need here
-	rts
+
+	jmp waitforcompletion
 	
 ; !warn "fileio_f256 module compiled to ", *-fileio_module_start, " bytes"
