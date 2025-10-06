@@ -102,14 +102,14 @@ fileio_module_start = *
 	+code
 	jsr CHRIN
 	ldx #0
-	and #$7F		; Ignore high bit (so Shift-Space is not a problem)
+;	and #$7F		; Ignore high bit (so Shift-Space is not a problem)
 	cmp #10			; Do two substitutions: \n -> \r and \t -> ' ' (actually, everything until \t)
 	bne +
 	lda #NEW_LINE
 +:
-	bcs +
-	lda #32
-+:
+;	bcs +
+;	lda #32
+;+:
 	jmp dpush_and_next
 
 +header ~xreadcharchecked, ~xreadcharchecked_n

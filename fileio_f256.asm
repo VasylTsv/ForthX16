@@ -1,5 +1,13 @@
 fileio_module_start = *
 
+; Reserving zero page locations
+; With some care could probably reuse regular scratches, but it may interfere with code being read and interpreted
++zpbyte ~completion
++zpword ~rc_scratch
+
+; Just make sure we are not taking too much
++zero_page_end $90
+
 ; File handle is used as a source id and that is not expected to be 0. However, the stream index is 0 to 7.
 ; To make it easier, open increments the value before returning and all other calls decrement it of use
 ; _streamid-1 to the same effect
@@ -16,7 +24,7 @@ f256buffersinit:
 	rts
 
 ; Common operations for many kernel calls. Checks for generic error and sets C if any occured.
-; It will wait until an error or an event in _scratch occurs.
+; It will wait until an error or an event in 'completion' occurs.
 !zone waitforcompletion
 waitforcompletion:
 	bcs error_return
@@ -25,7 +33,7 @@ waitforcompletion:
 	jsr kernel_NextEvent
 	bcs -
 	lda event_buffer+off_event_type
-	cmp _scratch
+	cmp completion
 	beq .return
 	cmp #kernel_event_file_ERROR
 	beq error_return
@@ -62,7 +70,7 @@ f256open:
 	sta kernel_args_file_open_drive
 	sty kernel_args_file_open_cookie
 	lda #kernel_event_file_OPENED
-	sta _scratch
+	sta completion
 	jsr kernel_File_Open
 	
 	jsr waitforcompletion
@@ -121,7 +129,7 @@ f256refill:
 	lda #64
 	sta kernel_args_file_read_buflen
 	lda #kernel_event_file_DATA
-	sta _scratch
+	sta completion
 	jsr kernel_File_Read
 
 	jsr waitforcompletion
@@ -158,7 +166,6 @@ refill_complete:
 	rts
 	
 ; Read one byte (character) from the stream. Buffer ID in Y, returns the char in A, status in C
-rc_scratch = _scratch
 f256readchar:
 	lda _streamload-1,y	; if the buffer is completely empty, it is either EOF or error, done with the stream
 	bne +
@@ -210,7 +217,7 @@ f256write:
 	lda _streamid-1,y
 	sta kernel_args_file_write_stream
 	lda #kernel_event_file_WROTE
-	sta _scratch
+	sta completion
 	jsr kernel_File_Write
 
 	jmp waitforcompletion

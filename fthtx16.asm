@@ -41,8 +41,8 @@
 ; ACME assembler does not have facilities to convert between int and string, unless I've missed something...
 VERSION_HIGH = "1"
 VERSION_HIGH_INT = 1
-VERSION_LOW = "4"
-VERSION_LOW_INT = 4
+VERSION_LOW = "5"
+VERSION_LOW_INT = 5
 
 ; ACME does not assume non-existing symbols to resolve to 0, forcing it here
 !ifndef C64 {
@@ -202,6 +202,8 @@ NEW_LINE = $0D
 
 +zero_page_begin $22	; Commander X16 user space $22-7F (94 bytes)
 
+; For the most purposes the order of these fielda does not matter, but for the assembler support the
+; requirement is for the first field to be _ri and the order until _scratch_2 fixed as below
 +zpword ~_ri					; inner interpreter registers
 +zpword ~_w
 +zpword ~_rstack				; stack pointers
@@ -714,18 +716,20 @@ call:
 !if C64 {
 	jsr STOP
 } else if F256 {
--:
-	jsr kernel_Yield
-	jsr kernel_NextEvent
-	bcs +
-	lda event_buffer+off_event_type    
-	cmp #kernel_event_key_RELEASED
-	bne -
-	lda event_buffer+off_event_key_flags 
-	and #event_key_META
-	bne +
-	lda event_buffer+off_event_key_ascii
-	cmp #3
+	bra +
+; This causes bad issues with I/O and not really working. Need a better solution
+;-:
+;	jsr kernel_Yield
+;	jsr kernel_NextEvent
+;	bcs +
+;	lda event_buffer+off_event_type    
+;	cmp #kernel_event_key_RELEASED
+;	bne -
+;	lda event_buffer+off_event_key_flags 
+;	and #event_key_META
+;	bne +
+;	lda event_buffer+off_event_key_ascii
+;	cmp #3
 } else {
 	!error "Not implemented"
 }
@@ -2709,8 +2713,17 @@ word_1:
 	+token over, ptrin, peek, greater
 	+qbranch_fwd word_2
 	+token dup, cpeek
-	+literal 127 ; a workaround for peculiar C64 annoyance
-	+token and_op, rat, equal
+!if C64 {
+	+literal 127 ; a workaround for peculiar C64 annoyance (shift-space looking just like a regular space)
+	+token and_op
+}
+	+token dup
+	+literal 9		; treat TAB as space
+	+token equal
+	+qbranch word_3
+	+token drop, bl
+word_3:
+	+token rat, equal
 	+qbranch_fwd word_2
 	+token ptrin, peek, oneplus, ptrin, poke, oneplus
 	+branch word_1
@@ -4050,45 +4063,6 @@ filestatus_1:
 	lda #255
 	sta _rscratch
 	jmp readfile_common
-;	+dpop
-;	sta rl_stream
-;	+dpop
-;	sta rl_limit
-;
-;	ldy #0
-;-:
-;	cpy rl_limit
-;	beq +
-;	phy
-;	ldy rl_stream
-;	jsr f256readchar
-;	ply
-;	bcs	rl_eos
-;	cmp #10
-;	beq +
-;	cmp #13
-;	beq +
-;	sta (_dtop),y
-;	iny
-;	bra -
-;
-;rl_eos:
-;	beq rl_fail		; some chars collected before eos - success
-;	
-;+:
-;	stz _dtop+1
-;	sty _dtop
-;	lda #255	; success line returns count, true, 0
-;-:
-;	tax
-;	+dpush
-;	
-;	lda #0
-;	tax
-;	jmp dpush_and_next
-;rl_fail:
-;	lda #0		; failed line return 0, false, 0
-;	bra -
 } else {
 	!error "Not implemented"
 }
@@ -4286,11 +4260,6 @@ wo_v:
 	+forth
 	+literal df_1
 	+token prepfname
-;	+token count
-;	+literal _fnamebuf
-;	+token place
-;	+literal _fnamebuf
-;	+token plusplace
 	+literal _fnamebuf
 	+token count
 	+literal 15
@@ -4306,24 +4275,11 @@ df_1:
 	+ldax _dtop
 	+stax kernel_args_file_delete_fname
 	jsr kernel_File_Delete
--:	
+	lda #kernel_event_file_DELETED
+df_continue:	; common code for DELETE-FILE and RENAME-FILE
+	sta completion
 	jsr waitforcompletion
 	bcs df_error
-	cmp #kernel_event_file_DELETED
-	bne -
-df_continue:	; common code for DELETE-FILE and RENAME-FILE
-;	bcs df_error
-;	
-;-:
-;	jsr kernel_Yield
-;	jsr kernel_NextEvent
-;	bcs -
-;	
-;	lda event_buffer+off_event_type
-;	cmp #kernel_event_file_ERROR
-;	beq df_error
-;	cmp #kernel_event_file_DELETED
-;	bne -
 
 	lda #0
 -:
@@ -4345,11 +4301,6 @@ df_error:
 	+forth
 	+literal rf_1
 	+token prepfname
-;	+token count
-;	+literal _fnamebuf
-;	+token place
-;	+literal _fnamebuf
-;	+token plusplace
 	+literal rf_2
 	+token count
 	+literal _fnamebuf
@@ -4377,34 +4328,8 @@ rf_2:
 	+ldax _dtop
 	+stax kernel_args_file_rename_old
 	jsr kernel_File_Rename
--:	
-	jsr waitforcompletion
-	bcs df_error						; note jump to a different word (common fragment)
-	cmp #kernel_event_file_RENAMED
-	bne -
-	bra df_continue
-;	bcs rf_error
-;	
-;-:
-;	jsr kernel_Yield
-;	jsr kernel_NextEvent
-;	bcs -
-;	
-;	lda event_buffer+off_event_type
-;	cmp #kernel_event_file_ERROR
-;	beq rf_error
-;	cmp #kernel_event_file_RENAMED
-;	bne -
-
-;	lda #0
-;-:
-;	sta _dtop
-;	sta _dtop+1
-;	jmp next
-;
-;rf_error:
-;	lda #255
-;	bne -
+	lda #kernel_event_file_RENAMED
+	bra df_continue						; note jump to a different word (common fragment)
 } else {
 	!error "Not implemented"
 }
@@ -5454,6 +5379,12 @@ order_done:
 +header ~ver, ~ver_n, "VER"
 	+code doconst
 	+value VERSION_HIGH_INT<<8 | VERSION_LOW_INT
+	; System configuration parameters for assembler module,
+	; to be accessed by ( ' VER >body 2+ 2xN + @ )
+	+value _ri
+	+value next
+	+value pop_dstack
+	+value push_dstack
 	
 !if C64 {
 +header ~c64, ~c64_n, "C64"
